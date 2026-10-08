@@ -84,6 +84,7 @@ data/
 data_store/
 artifacts/
 sample_store/
+docs-forme/
 *.csv
 *.xlsx
 *.7z
