@@ -1,0 +1,35 @@
+# Q3：Q2 + 经筛选的局部高阶基，检验高阶交互增量（仿真样本，P2）
+experiment_id: Q3
+features: [finance_base, gbs_marginal, gbs_second_order, gbs_higher_order]
+readout: ridge
+label_horizon: 21
+search:
+  param_grid:
+    alpha: [0.1, 1.0, 10.0]
+gbs:
+  backend: cached
+  sample_store: sample_store/
+  n_temporal: 32
+  n_spatial: 9                      # 空间模式数（我方真机 3×3=9；九章论文为 4×4=16）
+  n_shots: 20000
+  system_efficiency: 0.7
+  seed: 42
+  activation: soft                  # 高阶基软激活：demo 小规模寻址下硬激活退化为全零特征
+basis:
+  n1: 200                           # demo 小规模；论文 1000
+  n2: 8                             # demo 小规模；论文 2000
+  N: 50                             # demo 小规模；论文 3000
+  order: 3
+  seed: 42
+encoder:
+  n_bins_a: 16
+  n_bins_b: 16
+  partition_boundary: 16
+  mapping_id: "identity"
+blending:
+  enabled: true                     # Q 系默认开启 ρ 混合（基准固定为同折内 C2 口径 ridge）
+  uncertainty_enabled: false
+data:
+  pool: pool100
+  mock: {n_assets: 40, start: "2020-01-01", end: "2021-12-31", n_industries: 5, n_sub_industries: 10, seed: 42}
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}

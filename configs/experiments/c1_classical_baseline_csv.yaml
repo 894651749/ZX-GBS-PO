@@ -1,0 +1,18 @@
+# C1（真实数据）：修正口径 + 收缩风险 + 稳健约束的经典基线
+experiment_id: C1
+features: []
+readout: null                       # 不训练读出模型，引擎内置历史均值信号
+cov_method: ledoit_wolf             # Ledoit-Wolf 收缩协方差
+blending: {enabled: false}
+data:
+  adapter: csv
+  store_dir: data_store/            # ETL 产物目录（见 data_store/MANIFEST.md）
+  start: "2023-01-03"
+  end: "2025-12-31"
+  pool: zz800                       # 中证800 全集（2025 年末快照，非 PIT）
+  market_index: "000906.SH"         # 中证800 指数作为市场因子
+  constraints_config: default       # 占位约束成本（待中信确认）
+  rf_annual: 0.02                   # 占位待中信：现金管理年化收益率
+  data_version: "zxzz800-2023-2025-v1"
+# 真实数据仅 3 年：train 2y + valid 6m 后测试期约 6 个月（方案书 §7.2 口径下限）
+rolling: {train: "2y", valid: "6m", test: "1m", purge: "5d", embargo: "2d"}

@@ -1,0 +1,10 @@
+# C1：修正口径 + 收缩风险 + 稳健约束的经典基线
+experiment_id: C1
+features: []
+readout: null                       # 不训练读出模型，引擎内置历史均值信号
+cov_method: ledoit_wolf             # Ledoit-Wolf 收缩协方差
+blending: {enabled: false}          # C 系默认关闭 ρ 混合
+data:
+  pool: pool100
+  mock: {n_assets: 40, start: "2020-01-01", end: "2021-12-31", n_industries: 5, n_sub_industries: 10, seed: 42}
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}

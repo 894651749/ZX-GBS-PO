@@ -1,0 +1,42 @@
+# Q3（真实数据×仿真GBS）：Q2 + 经筛选的局部高阶基，检验高阶交互增量
+experiment_id: Q3
+features: [finance_base, gbs_marginal, gbs_second_order, gbs_higher_order]
+readout: ridge
+label_horizon: 21
+search:
+  param_grid:
+    alpha: [0.1, 1.0, 10.0]
+gbs:
+  backend: cached
+  sample_store: sample_store/
+  n_temporal: 32
+  n_spatial: 9
+  n_shots: 20000
+  system_efficiency: 0.7
+  seed: 42
+  activation: soft                  # 高阶基软激活
+basis:
+  n1: 200
+  n2: 8
+  N: 50
+  order: 3
+  seed: 42
+encoder:
+  n_bins_a: 16
+  n_bins_b: 16
+  partition_boundary: 16
+  mapping_id: "identity"
+blending:
+  enabled: true
+  uncertainty_enabled: false
+data:
+  adapter: csv
+  store_dir: data_store/
+  start: "2023-01-03"
+  end: "2025-12-31"
+  pool: zz800
+  market_index: "000906.SH"
+  constraints_config: default       # 占位约束成本（待中信确认）
+  rf_annual: 0.02                   # 占位待中信
+  data_version: "zxzz800-2023-2025-v1"
+rolling: {train: "2y", valid: "6m", test: "1m", purge: "5d", embargo: "2d"}

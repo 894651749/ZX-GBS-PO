@@ -1,0 +1,49 @@
+# 全局基础配置：数据适配器、滚动窗口、优化器与风险口径的占位配置
+# 各实验配置文件在此基础上覆盖差异项。
+
+data:
+  adapter: mock                     # 数据适配器：mock / csv（中信交付文件，文件清单见 configs/data/csv.yaml）
+  store_dir: data_store/            # csv 适配器数据根目录（mock 不使用）
+  data_version: "v0-placeholder"    # 数据版本标识（接入 ExperimentResult.data_version 前缀）
+  pool: pool100                     # 资产池标识（point-in-time 成分；mock 支持 pool100 / pool29）
+  market_index: IDX_MKT             # 市场指数代码（中性化市场因子 / extended 市场状态特征）
+  calendar: cnx                     # 交易日历标识
+
+rolling:
+  train: "3y"                       # 训练窗口长度
+  valid: "6m"                       # 验证窗口长度（特征筛选/超参搜索/混合系数/优化器参数选择）
+  test: "1m"                        # 测试窗口长度（再平衡周期）
+  purge: "5d"                       # 标签重叠剔除
+  embargo: "2d"                     # 隔离带
+
+# 成本口径：统一取自数据适配器的 constraints_costs 交付
+# （mock → configs/data/mock.yaml；csv → constraints_costs.csv），此处不再重复配置。
+
+optimizer:
+  risk_aversion: 5.0                # λ：风险厌恶系数
+  turnover_penalty: 0.001           # τ：换手惩罚系数
+  l2_regularization: 0.0001         # γ：L2 正则系数
+  uncertainty_kappa: 1.0            # κ：alpha − κ·uncertainty 折扣
+  weight_cap: 0.10                  # 个股权重上限（默认全池统一）
+  cash_range: [0.0, 0.05]           # 现金比例区间
+  # 验证期网格搜索（方案书 §6.2：λ/τ/γ/κ 应经 train/valid 选择）：
+  # 缺省不配置 search = 上方固定单点，行为与历史完全一致；配置多点网格后
+  # 逐折在 valid 窗用 BacktestEngine 扣成本净收益选优，测试期使用选中值
+  # （注意：此时测试期按折分别回测再拼接，与默认的连续回测口径不直接可比）。
+  # search:
+  #   risk_aversion: [1.0, 5.0, 10.0]
+  #   turnover_penalty: [0.0005, 0.001, 0.002]
+  #   l2_regularization: [0.0001]
+  #   uncertainty_kappa: [0.5, 1.0]
+
+seed: 42                            # 全局随机种子（mock 数据 / GBS 仿真的默认；可被 data.mock.seed、gbs.seed 覆盖）
+
+risk:
+  cov_method: ledoit_wolf           # 协方差口径：ledoit_wolf / sample / factor（实验 yaml 顶层 cov_method 可覆盖）
+  factor_cov_method: ewma           # 因子协方差估计：sample / ewma（cov_method=factor 时生效）
+  ewma_halflife: 60                 # EWMA 半衰期（交易日，cov_method=factor 时生效）
+
+blending:
+  uncertainty:
+    method: residual                # 不确定性口径：residual / block_bootstrap / quantile
+    block_length: 21                # 分块 bootstrap 块长（交易日）

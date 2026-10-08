@@ -1,0 +1,11 @@
+# C0：原经典均值—方差流程（mock 占位：样本均值 + 样本协方差 Markowitz）
+# 注意：真正的 C0 复现需中信 baseline_results（load_baseline_results 交付物）。
+experiment_id: C0
+features: []
+readout: null                       # 不训练读出模型，引擎内置历史均值信号
+cov_method: sample                  # 样本协方差（区别于 C1 的 LW 收缩）
+blending: {enabled: false}          # C 系默认关闭 ρ 混合
+data:
+  pool: pool100
+  mock: {n_assets: 40, start: "2020-01-01", end: "2021-12-31", n_industries: 5, n_sub_industries: 10, seed: 42}
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}

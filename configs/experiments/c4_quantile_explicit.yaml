@@ -1,0 +1,17 @@
+# C4：分位数 one-hot/显式交互，检验离散编码贡献（由 gbs/compression.py 承接）
+experiment_id: C4
+features: [finance_base, quantile_explicit]
+readout: ridge
+cov_method: ledoit_wolf
+label_horizon: 21
+quantile_explicit:
+  n_bins: 5                         # 每特征分箱数
+  max_interactions: 5               # 两两交互项上限（防爆维数）
+search:
+  param_grid:
+    alpha: [0.1, 1.0, 10.0]
+blending: {enabled: false}          # C 系默认关闭 ρ 混合
+data:
+  pool: pool100
+  mock: {n_assets: 40, start: "2020-01-01", end: "2021-12-31", n_industries: 5, n_sub_industries: 10, seed: 42}
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}

@@ -1,0 +1,16 @@
+# C3：原始金融特征 + 梯度提升树，经典非线性基线
+experiment_id: C3
+features: [finance_base]
+readout: gbm
+cov_method: ledoit_wolf
+label_horizon: 21
+readout_params:
+  params: {max_iter: 100, max_depth: 3, learning_rate: 0.1, random_state: 42}  # sklearn HGB
+search:
+  param_grid:
+    learning_rate: [0.05, 0.1]
+blending: {enabled: false}          # C 系默认关闭 ρ 混合
+data:
+  pool: pool100
+  mock: {n_assets: 40, start: "2020-01-01", end: "2021-12-31", n_industries: 5, n_sub_industries: 10, seed: 42}
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}

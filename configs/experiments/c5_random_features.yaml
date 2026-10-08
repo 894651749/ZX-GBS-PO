@@ -1,0 +1,19 @@
+# C5：等维 RFF/Nyström 随机特征，检验普通随机升维贡献（由 gbs/compression.py 承接）
+experiment_id: C5
+features: [finance_base, random_features]
+readout: ridge
+cov_method: ledoit_wolf
+label_horizon: 21
+random_features:
+  kind: rff                         # rff / nystrom
+  target_dim: "auto:Q2"             # 等维对齐 Q2 的 GBS 特征块维度（隔离"随机升维贡献"的前提）
+  gamma: 1.0
+  seed: 42
+blending: {enabled: false}          # C 系默认关闭 ρ 混合
+search:
+  param_grid:
+    alpha: [0.1, 1.0, 10.0]
+data:
+  pool: pool100
+  mock: {n_assets: 40, start: "2020-01-01", end: "2021-12-31", n_industries: 5, n_sub_industries: 10, seed: 42}
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}

@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qgbs"
+version = "0.1.0"
+description = "真机 GBS（高斯玻色采样）特征增强的投资组合优化研究项目"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy",
+    "pandas",
+    "scipy",
+    "scikit-learn",
+    "cvxpy",
+    "pyarrow",
+    "pyyaml",
+    "pydantic",
+]
+
+[project.optional-dependencies]
+gbm = ["lightgbm"]
+gbs-sim = ["strawberryfields", "thewalrus"]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

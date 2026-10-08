@@ -1,0 +1,95 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- 测试与缓存 ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+
+# ---- Jupyter ----
+.ipynb_checkpoints/
+
+# ---- 打包 / 构建 ----
+*.manifest
+*.spec
+
+# ---- IDE / 编辑器 ----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# ---- 操作系统 ----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ---- 密钥与环境变量 ----
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+*.pem
+*.key
+secrets/
+
+# ---- 日志 ----
+*.log
+logs/
+
+# ---- 项目数据与产物（体积大，不上传 GitHub）----
+data/
+data_store/
+artifacts/
+sample_store/
+*.csv
+*.xlsx
+*.7z
+*.zip
+*.tar
+*.tar.gz
+
+# ---- 文档 PDF（如需保留可删除此行）----
+# *.pdf

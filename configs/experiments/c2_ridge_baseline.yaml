@@ -1,0 +1,16 @@
+# C2：原始金融特征 + 岭回归，线性监督学习基线
+experiment_id: C2
+features: [finance_base]
+# 金融特征集切换（默认 base，不改变本实验行为）；extended 追加下行风险/回撤/量价异常/市场状态特征：
+# features: {families: [finance_base], finance_set: extended}
+readout: ridge
+cov_method: ledoit_wolf
+label_horizon: 21                   # 标签前视窗（交易日），与月度调仓对齐
+search:
+  param_grid:
+    alpha: [0.1, 1.0, 10.0]         # ridge 正则强度小网格（valid 窗选优）
+blending: {enabled: false}          # C 系默认关闭 ρ 混合
+data:
+  pool: pool100
+  mock: {n_assets: 40, start: "2020-01-01", end: "2021-12-31", n_industries: 5, n_sub_industries: 10, seed: 42}
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}

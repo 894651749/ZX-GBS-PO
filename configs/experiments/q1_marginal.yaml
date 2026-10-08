@@ -1,0 +1,28 @@
+# Q1：原始特征 + GBS 边际特征，检验单模式信息（仿真样本，P2）
+experiment_id: Q1
+features: [finance_base, gbs_marginal]
+readout: ridge
+label_horizon: 21
+search:
+  param_grid:
+    alpha: [0.1, 1.0, 10.0]
+gbs:
+  backend: cached                   # 统一走质检样本库（simulation 命名空间）
+  sample_store: sample_store/       # 样本库根目录（不存在则由 simulator 生成入库）
+  n_temporal: 32                    # 时间模式数（demo 小规模；论文 511）
+  n_spatial: 9                      # 空间模式数（我方真机 3×3=9；九章论文为 4×4=16）
+  n_shots: 20000                    # 采样数
+  system_efficiency: 0.7            # η
+  seed: 42
+encoder:
+  n_bins_a: 16                      # A 分区 bin 数（demo 小规模；论文 256）
+  n_bins_b: 16                      # B 分区 bin 数（demo 小规模；论文 255）
+  partition_boundary: 16            # 时间模式分区边界（论文默认 256）
+  mapping_id: "identity"            # 预先固定的模式映射 ID
+blending:
+  enabled: true                     # Q 系默认开启 ρ 混合（方案书 §5.4/§6.3；基准固定为同折内 C2 口径 ridge）
+  uncertainty_enabled: false        # 逐资产不确定性 → 优化器（链路已接通，默认关闭保持口径）
+data:
+  pool: pool100
+  mock: {n_assets: 40, start: "2020-01-01", end: "2021-12-31", n_industries: 5, n_sub_industries: 10, seed: 42}
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}
