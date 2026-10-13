@@ -1,0 +1,46 @@
+# E4.4 第三步：q4_full_enhanced_hardware_p1ext 的 extended_plus 变体（新信号水平下 GBS 复检），仅 features 的 finance_set 不同
+# G0：q4_full_enhanced_hardware 的 P1+extended 基座变体（rolling→P1 冻结协议，finance base→extended；
+# 其余字段与 q4_full_enhanced_hardware.yaml 逐字段一致。按路径运行，不注册 registry。）
+# Q4（真实数据×真机GBS）：GBS 特征 + 经典非线性读出，评估完整增强配置
+# 真机批次 hw-5M-b0（511×16=8176 模式）；basis/encoder/readout 与 csv 版一致，
+# 仅 GBS 样本来源不同。按路径运行，不在 registry 中。
+experiment_id: Q4
+features: {families: [finance_base, gbs_marginal, gbs_second_order, gbs_higher_order], finance_set: extended_plus}
+readout: gbm
+label_horizon: 21
+readout_params:
+  params: {max_iter: 100, max_depth: 3, learning_rate: 0.1, random_state: 42}
+gbs:
+  backend: cached
+  namespace: hardware
+  batch_id: hw-5M-b0
+  sample_store: sample_store/
+  n_temporal: 511
+  n_spatial: 16
+  n_shots: 200000                   # 子采样语义：取批次前 200000 shots
+  activation: soft
+basis:
+  n1: 200
+  n2: 8
+  N: 50
+  order: 3
+  seed: 42
+encoder:
+  n_bins_a: 256
+  n_bins_b: 255
+  partition_boundary: 256
+  mapping_id: "identity"
+blending:
+  enabled: true
+  uncertainty_enabled: false
+data:
+  adapter: csv
+  store_dir: data_store/
+  start: "2023-01-03"
+  end: "2025-12-31"
+  pool: zz800
+  market_index: "000906.SH"
+  constraints_config: default       # 占位约束成本（待中信确认）
+  rf_annual: 0.02                   # 占位待中信
+  data_version: "zxzz800-2023-2025-v1"
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}  # 冻结协议 P1

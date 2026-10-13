@@ -11,7 +11,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from qgbs.data.adapters.base import DailyMarket
+from qgbs.data.adapters.base import DailyMarket, TradingStatus
 
 DEFAULT_WINDOWS: dict[str, int] = {
     "momentum_short": 5,
@@ -166,6 +166,9 @@ def build_finance_features(
     windows: dict[str, int] | None = None,
     feature_set: str = "base",
     market_returns: pd.Series | None = None,
+    industry_index_returns: pd.DataFrame | None = None,
+    industry_map: pd.Series | None = None,
+    status: "TradingStatus | None" = None,
 ) -> pd.DataFrame:
     """从日频行情长表汇总经典金融特征面板。
 
@@ -174,9 +177,14 @@ def build_finance_features(
         windows: 窗口参数覆盖，默认见 :data:`DEFAULT_WINDOWS`。
         feature_set: "base"（默认，11 个基础特征，向后兼容）或
             "extended"（基础特征 + 下行波动/回撤/量价异常/市场状态，
-            对齐方案书 §5.2）。
+            对齐方案书 §5.2）或 "extended_plus"（extended + 市值/行业相对/
+            状态股龄族，E4.4 输入增强）。
         market_returns: 可选的宽基指数日收益（索引为交易日），仅 extended
             的市场波动特征使用；缺省时用候选池等权平均收益作市场代理。
+        industry_index_returns: 行业指数日收益宽表（date × 行业代码），
+            extended_plus 的行业相对族必需。
+        industry_map: symbol → 行业代码映射，extended_plus 必需。
+        status: 日频交易状态（is_st/list_date），extended_plus 的状态股龄族必需。
 
     Returns:
         索引为 (date, symbol) 的 MultiIndex DataFrame，列为特征名。
@@ -185,10 +193,15 @@ def build_finance_features(
         extended 追加：downside_vol_20、mdd_20/mdd_60、volume_abnormal_20、
         turnover_vol_20、mkt_vol_20、mkt_corr_20、mkt_disp_20、mkt_breadth
         （市场状态特征按 date 广播到所有股票）。
+        extended_plus 再追加：mv_log（log 流通市值；量纲经下游 FactorPipeline
+        截面 z-score 统一处理，特征层保持原始尺度惯例）、ind_rel_mom_20 /
+        ind_rel_rev_5 / ind_rel_vol_20（个股减行业指数同窗口量；相对波动按差
+        口径——波动率正偏态，差口径对称且与截面标准化兼容）、is_st、
+        list_age（log1p 上市日历天数）。
         窗口不足的特征为 NaN（由下游 pipeline 处理）。
     """
-    if feature_set not in ("base", "extended"):
-        raise ValueError(f"未知 feature_set: {feature_set!r}（支持 'base'/'extended'）")
+    if feature_set not in ("base", "extended", "extended_plus"):
+        raise ValueError(f"未知 feature_set: {feature_set!r}（支持 'base'/'extended'/'extended_plus'）")
     w = dict(DEFAULT_WINDOWS)
     if windows:
         w.update(windows)
@@ -212,7 +225,7 @@ def build_finance_features(
     amount = volume * close
     feats["amihud_20"] = amihud_illiquidity(close, amount, w["liquidity"])
 
-    if feature_set == "extended":
+    if feature_set in ("extended", "extended_plus"):
         turnover = rows.pivot(index="trade_date", columns="symbol", values="turnover_rate").sort_index()
         ret_wide = close.pct_change()
         feats[f"downside_vol_{w['downside']}"] = downside_volatility(close, w["downside"])
@@ -223,6 +236,72 @@ def build_finance_features(
         for name, series in market_state_features(ret_wide, w["market_state"], market_ret=market_returns).items():
             feats[name] = _broadcast_to_universe(series, close)
 
+    if feature_set == "extended_plus":
+        for name, f in _extended_plus_features(
+            close, w, industry_index_returns, industry_map, status, rows
+        ).items():
+            feats[name] = f
+
     panel = pd.DataFrame({name: f.stack() for name, f in feats.items()})
     panel.index.names = ["date", "symbol"]
     return panel.sort_index()
+
+
+def _extended_plus_features(
+    close: pd.DataFrame,
+    w: dict[str, int],
+    industry_index_returns: pd.DataFrame | None,
+    industry_map: pd.Series | None,
+    status: TradingStatus | None,
+    rows: pd.DataFrame,
+) -> dict[str, pd.DataFrame]:
+    """extended_plus 三个新族（E4.4）：市值 / 行业相对 / 状态股龄。"""
+    if industry_index_returns is None or industry_map is None:
+        raise ValueError("feature_set='extended_plus' 需要 industry_index_returns 与 industry_map")
+    if status is None:
+        raise ValueError("feature_set='extended_plus' 需要 status（is_st / list_date）")
+    out: dict[str, pd.DataFrame] = {}
+
+    # --- 市值族：log 流通市值（原始尺度，量纲由下游截面 z-score 统一） ---
+    float_mv = rows.pivot(index="trade_date", columns="symbol", values="float_mv").sort_index()
+    out["mv_log"] = np.log(float_mv.where(float_mv > 0)).reindex(
+        index=close.index, columns=close.columns
+    )
+
+    # --- 行业相对族：个股 − 行业指数同窗口量（行业指数仅收益序列，动量用复利口径，
+    # 与个股 close/shift−1 的单期累计收益口径一致） ---
+    ind_ret = industry_index_returns.sort_index()
+    log1p_ind = np.log1p(ind_ret)
+    ind_mom20 = np.expm1(log1p_ind.rolling(w["momentum_mid"]).sum())
+    ind_mom5 = np.expm1(log1p_ind.rolling(w["reversal"]).sum())
+    ind_vol20 = ind_ret.rolling(w["volatility_short"]).std()
+    sym_ind = industry_map.reindex(close.columns)  # symbol → 行业代码（缺失 NaN）
+
+    def _ind_broadcast(ind_feat: pd.DataFrame) -> pd.DataFrame:
+        pos = ind_feat.columns.get_indexer(sym_ind.fillna(""))
+        vals = np.where(
+            (pos >= 0)[None, :],
+            ind_feat.to_numpy()[:, np.clip(pos, 0, None)],
+            np.nan,
+        )
+        return pd.DataFrame(vals, index=ind_feat.index, columns=close.columns)
+
+    ind_mom20_b = _ind_broadcast(ind_mom20).reindex(close.index)
+    ind_mom5_b = _ind_broadcast(ind_mom5).reindex(close.index)
+    ind_vol20_b = _ind_broadcast(ind_vol20).reindex(close.index)
+    out["ind_rel_mom_20"] = momentum(close, w["momentum_mid"]) - ind_mom20_b
+    out["ind_rel_rev_5"] = reversal(close, w["reversal"]) - (-ind_mom5_b)
+    out["ind_rel_vol_20"] = volatility(close, w["volatility_short"]) - ind_vol20_b
+
+    # --- 状态/股龄族：ST 标记与上市天数（逐日因果） ---
+    is_st = status.rows.pivot(index="trade_date", columns="symbol", values="is_st")
+    out["is_st"] = is_st.reindex(index=close.index, columns=close.columns).astype(float)
+    list_date = pd.to_datetime(status.rows.groupby("symbol")["list_date"].first())
+    age_days = (
+        close.index.to_numpy()[:, None] - list_date.reindex(close.columns).to_numpy()[None, :]
+    ).astype("timedelta64[D]").astype(float)
+    out["list_age"] = pd.DataFrame(
+        np.log1p(np.where(age_days >= 0, age_days, np.nan)),
+        index=close.index, columns=close.columns,
+    )
+    return out

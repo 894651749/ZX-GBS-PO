@@ -99,6 +99,8 @@ artifacts/          实验产物（不入库）
 - **C0-C5**：经典对照（基线复现、修正基线、Ridge、GBM、分位数显式、随机特征）
 - **Q1-Q4**：GBS 特征族（边际、二阶、高阶、全量增强）
 - 配置同名双版本：无后缀 = mock 数据；`_csv` 后缀 = 中信真实交付数据
+- `_hardware` 后缀 = 真机 GBS 样本（批次入库见 `scripts/ingest_hardware_samples.py`；
+  按路径运行，不注册进 registry，如 `q1_marginal_hardware.yaml`）
 
 ## 注意事项
 

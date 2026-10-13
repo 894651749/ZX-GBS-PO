@@ -1,0 +1,44 @@
+# Q3（真实数据×真机GBS）：Q2 + 经筛选的局部高阶基，检验高阶交互增量
+# 真机批次 hw-5M-b0（511×16=8176 模式）；basis/encoder/readout 与 csv 版一致，
+# 仅 GBS 样本来源不同。按路径运行，不在 registry 中。
+experiment_id: Q3
+features: [finance_base, gbs_marginal, gbs_second_order, gbs_higher_order]
+readout: ridge
+label_horizon: 21
+search:
+  param_grid:
+    alpha: [0.1, 1.0, 10.0]
+gbs:
+  backend: cached
+  namespace: hardware
+  batch_id: hw-5M-b0
+  sample_store: sample_store/
+  n_temporal: 511
+  n_spatial: 16
+  n_shots: 200000                   # 子采样语义：取批次前 200000 shots
+  activation: soft                  # 高阶基软激活
+basis:
+  n1: 200
+  n2: 8
+  N: 50
+  order: 3
+  seed: 42
+encoder:
+  n_bins_a: 256
+  n_bins_b: 255
+  partition_boundary: 256
+  mapping_id: "identity"
+blending:
+  enabled: true
+  uncertainty_enabled: false
+data:
+  adapter: csv
+  store_dir: data_store/
+  start: "2023-01-03"
+  end: "2025-12-31"
+  pool: zz800
+  market_index: "000906.SH"
+  constraints_config: default       # 占位约束成本（待中信确认）
+  rf_annual: 0.02                   # 占位待中信
+  data_version: "zxzz800-2023-2025-v1"
+rolling: {train: "2y", valid: "6m", test: "1m", purge: "5d", embargo: "2d"}

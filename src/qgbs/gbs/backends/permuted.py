@@ -32,9 +32,14 @@ class PermutedBackend:
         return self.base.n_modes
 
     def permute(self, batch: SampleBatch) -> SampleBatch:
-        """对一个批次做逐模式列独立置换（保持边际、破坏联合）。"""
+        """对一个批次做逐模式列独立置换（保持边际、破坏联合）。
+
+        ``Generator.permuted(axis=0)`` 向量化逐列 shuffle（真机 200k×8176
+        约 1.6GB 输出可行）；与旧逐列 ``apply_along_axis`` 同语义同确定性
+        （同 seed 结果可复现，但具体置换序列与旧实现不同）。
+        """
         rng = np.random.default_rng((self.seed, batch.meta.n_shots))
-        permuted = np.apply_along_axis(rng.permutation, 0, batch.samples)
+        permuted = rng.permuted(batch.samples, axis=0)
         meta = dataclasses.replace(
             batch.meta,
             batch_id=f"{batch.meta.batch_id}-permuted-s{self.seed}",

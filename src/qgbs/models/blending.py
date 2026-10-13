@@ -51,15 +51,42 @@ def estimate_rho(
     pred_classic: pd.Series,
     y_valid: pd.Series,
     grid: np.ndarray | None = None,
+    *,
+    selection: str = "point",
+    n_bootstrap: int = 2000,
+    block_length: int = 5,
+    seed: int = 42,
 ) -> float:
-    """在验证窗口上网格搜索最优 ρ（逐日 rank IC 均值最大化）。"""
+    """在验证窗口上网格搜索最优 ρ（逐日 rank IC 口径）。
+
+    Args:
+        selection: "point"（默认）按 IC 均值最优（原行为）；
+            "lower_bound" 按 IC 均值的块 bootstrap 95% CI 下界最优——
+            IC 均值相近时偏好下界更高（折间更稳）的 ρ，抑制噪声窗上
+            点估计对极端值的偏好（E2.4 稳健化口径）。
+        n_bootstrap / block_length / seed: lower_bound 口径的 bootstrap 参数
+            （point 下不生效）。
+    """
+    if selection not in ("point", "lower_bound"):
+        raise ValueError(f"未知 ρ 选择口径: {selection!r}（支持 point / lower_bound）")
     if grid is None:
         grid = np.linspace(0.0, 1.0, 11)
     best_rho, best_score = 0.0, float("-inf")
     for rho in grid:
         blended = shrinkage_blend(pred_gbs, pred_classic, float(rho)).prediction
         ics = _per_date_rank_ic(blended, y_valid)
-        score = float(ics.mean()) if len(ics) else float("nan")
+        if len(ics) == 0:
+            continue
+        if selection == "point":
+            score = float(ics.mean())
+        else:
+            from qgbs.experiments.report import block_bootstrap_ci
+
+            score, _ = block_bootstrap_ci(
+                ics, statistic="mean", n_bootstrap=n_bootstrap,
+                block_length=min(block_length, max(2, int(np.sqrt(len(ics))))),
+                level=0.95, seed=seed,
+            )
         if pd.notna(score) and score > best_score:
             best_rho, best_score = float(rho), score
     return best_rho

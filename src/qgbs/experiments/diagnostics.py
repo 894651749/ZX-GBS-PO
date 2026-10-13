@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -14,7 +15,12 @@ import pandas as pd
 from qgbs.backtest.metrics import ic_series
 from qgbs.experiments.report import block_bootstrap_ci
 from qgbs.gbs.backends.base import SampleBatch
-from qgbs.gbs.statistics import batch_dispersion, marginal_stats, subbatch_resample
+from qgbs.gbs.statistics import (
+    batch_dispersion,
+    marginal_stats,
+    second_order_stats,
+    subbatch_resample,
+)
 from qgbs.models.readout import RidgeReadout
 
 
@@ -28,17 +34,135 @@ class DiagnosticResult:
     details: dict[str, object] = field(default_factory=dict)
 
 
+def _merge_samples(batches: list[SampleBatch]) -> np.ndarray:
+    """同来源多批次纵向拼接（单批次零拷贝）。"""
+    if len(batches) == 1:
+        return np.asarray(batches[0].samples)
+    return np.concatenate([np.asarray(b.samples) for b in batches], axis=0)
+
+
 def hardware_vs_simulation(
     hardware_batches: list[SampleBatch],
     simulation_batches: list[SampleBatch],
 ) -> DiagnosticResult:
     """诊断一：真机 vs 仿真样本对照（§7.1）。
 
-    对比同源编码态下真机与仿真样本的边际/二阶统计差异与系统效率 η
-    的影响。判读：差异是否随 η 单调变化——若是，装置噪声为一阶因素，
-    特征构造须基于标定后的标准化响应。
+    对比真机与仿真样本的三层统计差异，均附采样噪声底（比值 >1 即超出
+    有限样本涨落）：
+
+    1. 逐模式边际 click 率：L1 / L∞ / 分位数概览；
+    2. 二阶 click 相关系数矩阵（非对角元，对边际失配免疫）：Frobenius
+       差异与逐元素最大差；噪声底用真机批次 split-half 经验估计；
+    3. 子系统分布：按 mode_config 的 (n_temporal, n_spatial) 把逐模式边际
+       聚合成时间/空间两个一维剖面，对比剖面 L1 与 Pearson 相关。
+
+    单批次现实适配：原设计"差异随 η 单调变化"的判读需要多批次不同 η
+    （或标定数据）；当前真机仅单批次且 meta.system_efficiency 为占位
+    None，η 单调性判读不做——多批次接口签名保留，同来源多批次只做
+    纵向合并。二阶统计经分块 Gram 累加计算（statistics.second_order_stats），
+    支持 200k+ shots 大模式批次。
     """
-    raise NotImplementedError  # P3：等真机样本
+    if not hardware_batches or not simulation_batches:
+        raise ValueError("hardware_batches / simulation_batches 均不能为空")
+    hw = _merge_samples(hardware_batches)
+    sim = _merge_samples(simulation_batches)
+    if hw.shape[1] != sim.shape[1]:
+        raise ValueError(f"两源模式数不一致: {hw.shape[1]} vs {sim.shape[1]}")
+    n_hw, n_sim = hw.shape[0], sim.shape[0]
+    b_hw = hardware_batches[0]
+    b_sim = simulation_batches[0]
+
+    # --- 1) 边际 ---
+    m_hw = hw.sum(axis=0, dtype=np.uint64).astype(float) / n_hw
+    m_sim = sim.sum(axis=0, dtype=np.uint64).astype(float) / n_sim
+    d_marg = np.abs(m_hw - m_sim)
+    pooled = 0.5 * (m_hw + m_sim)
+    # 两独立有限样本边际差异的期望噪声底（E|N(0,σ²)|=σ√(2/π)，σ²=p(1-p)(1/n1+1/n2)）
+    marg_se = np.sqrt(2.0 / np.pi) * np.sqrt(pooled * (1.0 - pooled) * (1.0 / n_hw + 1.0 / n_sim))
+    marg_l1_floor = float(marg_se.sum())
+    q = np.quantile(d_marg, [0.5, 0.9, 0.99])
+
+    # --- 2) 二阶（click 相关矩阵，非对角元）---
+    corr_hw = second_order_stats(b_hw, "correlation")
+    corr_sim = second_order_stats(b_sim, "correlation")
+    offdiag = ~np.eye(hw.shape[1], dtype=bool)
+    d_corr = (corr_hw - corr_sim)[offdiag]
+    fro = float(np.sqrt((d_corr**2).sum()))
+    # 噪声底：真机批次 split-half 相关矩阵 Frobenius 差异 / 2
+    # （半样本差异方差是全样本对照方差的 4 倍；v ∝ 1/m）
+    half = n_hw // 2
+    meta2 = dataclasses.replace(b_hw.meta, n_shots=n_hw - half)
+    half_batch = [SampleBatch(meta=b_hw.meta, samples=b_hw.samples[:half]),
+                  SampleBatch(meta=meta2, samples=b_hw.samples[half:])]
+    c1 = second_order_stats(half_batch[0], "correlation")
+    c2 = second_order_stats(half_batch[1], "correlation")
+    corr_floor = 0.5 * float(np.sqrt((((c1 - c2)[offdiag]) ** 2).sum()))
+
+    # --- 3) 子系统剖面（时间/空间聚合）---
+    mc = b_hw.meta.mode_config
+    n_t, n_s = int(mc.get("n_temporal", 0)), int(mc.get("n_spatial", 0))
+    temporal: dict[str, float] = {}
+    if n_t * n_s == hw.shape[1] and n_t > 0:
+        # mode = temporal × n_spatial + spatial（与编码/仿真器约定一致）
+        t_hw = m_hw.reshape(n_t, n_s).mean(axis=1)
+        t_sim = m_sim.reshape(n_t, n_s).mean(axis=1)
+        s_hw = m_hw.reshape(n_t, n_s).mean(axis=0)
+        s_sim = m_sim.reshape(n_t, n_s).mean(axis=0)
+        temporal = {
+            "temporal_l1": float(np.abs(t_hw - t_sim).sum()),
+            "temporal_corr": float(np.corrcoef(t_hw, t_sim)[0, 1]),
+            "spatial_l1": float(np.abs(s_hw - s_sim).sum()),
+            "spatial_corr": float(np.corrcoef(s_hw, s_sim)[0, 1]),
+        }
+
+    rows = [
+        {"metric": "marginal_l1", "value": float(d_marg.sum()),
+         "noise_floor": marg_l1_floor, "note": "逐模式边际 click 率差异 L1"},
+        {"metric": "marginal_linf", "value": float(d_marg.max()),
+         "noise_floor": float(marg_se.max()), "note": "逐模式边际差异 L∞"},
+        {"metric": "marginal_mean_abs", "value": float(d_marg.mean()),
+         "noise_floor": float(marg_se.mean()), "note": "边际平均绝对差"},
+        {"metric": "second_order_corr_frobenius", "value": fro,
+         "noise_floor": corr_floor, "note": "click 相关矩阵非对角元 Frobenius 差异（split-half 噪声底）"},
+        {"metric": "second_order_corr_max_abs", "value": float(np.abs(d_corr).max()),
+         "noise_floor": float("nan"), "note": "相关矩阵逐元素最大差"},
+        *[
+            {"metric": k, "value": v, "noise_floor": float("nan"),
+             "note": "时间/空间聚合剖面差异" + ("（Pearson 相关）" if k.endswith("corr") else "（L1）")}
+            for k, v in temporal.items()
+        ],
+    ]
+    table = pd.DataFrame(rows).set_index("metric")
+    table["ratio"] = table["value"] / table["noise_floor"].where(table["noise_floor"] > 0)
+
+    marg_ratio = float(d_marg.sum()) / marg_l1_floor if marg_l1_floor > 0 else float("inf")
+    corr_ratio = fro / corr_floor if corr_floor > 0 else float("inf")
+    verdict = (
+        f"真机 vs 仿真（hw {n_hw} shots / sim {n_sim} shots）："
+        f"边际 L1 {d_marg.sum():.2f}（{marg_ratio:.1f}× 噪声底）、"
+        f"L∞ {d_marg.max():.4f}；"
+        f"二阶相关 Frobenius {fro:.2f}（{corr_ratio:.1f}× split-half 噪声底）、"
+        f"逐元素最大 {np.abs(d_corr).max():.3f}。"
+        + (f"时间剖面相关 {temporal['temporal_corr']:.3f}、空间剖面相关 {temporal['spatial_corr']:.3f}。"
+           if temporal else "")
+        + "单批次现实：真机 η 未标定（占位 None），η 单调性判读不做。"
+        + ("判读：二阶差异远超噪声底 → 联合结构存在装置级差异（噪声/干涉结构），"
+           "GBS 联合类特征的仿真结论不可外推真机。"
+           if corr_ratio > 5 else
+           "判读：二阶差异与噪声底同量级 → 仿真联合结构与真机无显著差异。")
+    )
+    return DiagnosticResult(
+        diagnostic="hardware_vs_simulation",
+        table=table,
+        verdict=verdict,
+        details={
+            "n_shots_hw": n_hw, "n_shots_sim": n_sim,
+            "batch_hw": b_hw.meta.batch_id, "batch_sim": b_sim.meta.batch_id,
+            "marginal_abs_quantiles": {"p50": float(q[0]), "p90": float(q[1]), "p99": float(q[2])},
+            "mean_click_hw": float(m_hw.mean()), "mean_click_sim": float(m_sim.mean()),
+            **temporal,
+        },
+    )
 
 
 def _panel_mean_ic(feats: pd.DataFrame, y: pd.Series) -> pd.Series:
@@ -79,6 +203,20 @@ def permutation_control(
         verdict=verdict,
         details={"joint_ic_diff_mean": joint_diff},
     )
+
+
+def _quantile_linear(sorted_ref: np.ndarray, q: np.ndarray) -> np.ndarray:
+    """有序参考序列上的线性插值分位数（与 np.quantile 默认 linear 口径数值一致）。
+
+    np.quantile 对多查询点会逐点 partial-sort（O(nq·m)），大面板下不可用；
+    此处排序一次后向量化插值（O(m log m + nq log m)）。
+    """
+    m = len(sorted_ref)
+    pos = np.clip(q, 0.0, 1.0) * (m - 1)
+    lo = np.floor(pos).astype(np.int64)
+    frac = pos - lo
+    hi = np.minimum(lo + 1, m - 1)
+    return sorted_ref[lo] * (1.0 - frac) + sorted_ref[hi] * frac
 
 
 class GaussianCopulaMatchedFeatures:
@@ -126,7 +264,7 @@ class GaussianCopulaMatchedFeatures:
         u = (np.arange(n) + 0.5) / n
         for j in range(len(self._columns)):
             order = np.argsort(z[:, j], kind="stable")
-            out[order, j] = np.quantile(self._marginals[j], u)
+            out[order, j] = _quantile_linear(self._marginals[j], u)
         return pd.DataFrame(out, index=index, columns=self._columns)
 
     @property

@@ -1,0 +1,40 @@
+# E3.2 shots 爬坡变体（n_shots=500000），其余与 q2_second_order_hardware_p1ext.yaml 逐字段一致
+# G0：q2_second_order_hardware 的 P1+extended 基座变体（rolling→P1 冻结协议，finance base→extended；
+# 其余字段与 q2_second_order_hardware.yaml 逐字段一致。按路径运行，不注册 registry。）
+# Q2（真实数据×真机GBS）：Q1 + GBS 二阶联合特征，检验联合关联增量
+# 真机批次 hw-5M-b0（511×16=8176 模式）；二阶词表分块累加 + 跨折缓存
+# （词表与折无关，全实验只算一次）。按路径运行，不在 registry 中。
+experiment_id: Q2
+features: {families: [finance_base, gbs_marginal, gbs_second_order], finance_set: extended}
+readout: ridge
+label_horizon: 21
+search:
+  param_grid:
+    alpha: [0.1, 1.0, 10.0]
+gbs:
+  backend: cached
+  namespace: hardware
+  batch_id: hw-5M-b0
+  sample_store: sample_store/
+  n_temporal: 511
+  n_spatial: 16
+  n_shots: 500000                   # 子采样语义：取批次前 200000 shots
+encoder:
+  n_bins_a: 256
+  n_bins_b: 255
+  partition_boundary: 256
+  mapping_id: "identity"
+blending:
+  enabled: true
+  uncertainty_enabled: false
+data:
+  adapter: csv
+  store_dir: data_store/
+  start: "2023-01-03"
+  end: "2025-12-31"
+  pool: zz800
+  market_index: "000906.SH"
+  constraints_config: default       # 占位约束成本（待中信确认）
+  rf_annual: 0.02                   # 占位待中信
+  data_version: "zxzz800-2023-2025-v1"
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}  # 冻结协议 P1

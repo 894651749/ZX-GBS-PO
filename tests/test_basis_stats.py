@@ -53,6 +53,32 @@ def test_second_order_kinds() -> None:
     assert corr[0, 1] == pytest.approx(np.corrcoef(samples[:, 0], samples[:, 1])[0, 1])
 
 
+def test_second_order_chunked_equivalence(monkeypatch) -> None:
+    """分块实现与原全量口径数值等价（joint 精确整数和；cov/corr < 1e-12）。"""
+    import qgbs.gbs.statistics as stats_mod
+
+    rng = np.random.default_rng(0)
+    samples = (rng.random((2000, 64)) < 0.27).astype(np.uint8)
+    samples[:, 3] = 1  # 常数列：零方差处置
+    batch = SampleBatch(meta=_meta(2000, 64), samples=samples)
+    Xf = samples.astype(float)
+    refs = {
+        "joint": (Xf.T @ Xf) / len(Xf),
+        "covariance": np.cov(Xf.T),
+    }
+    std = np.sqrt(np.diag(refs["covariance"]))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        raw = refs["covariance"] / np.outer(std, std)
+    refs["correlation"] = np.where(np.isfinite(raw), raw, 0.0)
+    for kind, ref in refs.items():
+        diff = float(np.abs(second_order_stats(batch, kind) - ref).max())
+        assert diff < 1e-12, f"{kind} 单块 diff={diff}"
+        monkeypatch.setattr(stats_mod, "_SECOND_ORDER_CHUNK_ROWS", 37)  # 强制多块
+        diff = float(np.abs(second_order_stats(batch, kind) - ref).max())
+        assert diff < 1e-12, f"{kind} 多块 diff={diff}"
+        monkeypatch.undo()
+
+
 def test_higher_order_stats_counts() -> None:
     samples = np.array([[1, 1, 1], [1, 1, 0], [0, 1, 1], [1, 1, 1]], dtype=np.uint8)
     batch = SampleBatch(meta=_meta(4, 3), samples=samples)

@@ -1,0 +1,40 @@
+# E3.3 映射对照（mapping_id=identity，encoder 为 E3.1 标定值 255/256/255），其余与 q1_marginal_hardware_p1ext.yaml 一致
+# G0：q1_marginal_hardware 的 P1+extended 基座变体（rolling→P1 冻结协议，finance base→extended；
+# 其余字段与 q1_marginal_hardware.yaml 逐字段一致。按路径运行，不注册 registry。）
+# Q1（真实数据×真机GBS）：原始特征 + GBS 边际特征，检验单模式信息
+# 真机批次 hw-5M-b0（511 时间 × 16 空间 = 8176 模式，np.packbits 位压缩），
+# 入库见 scripts/ingest_hardware_samples.py；按路径运行，不在 registry 中。
+experiment_id: Q1
+features: {families: [finance_base, gbs_marginal], finance_set: extended}
+readout: ridge
+label_horizon: 21
+search:
+  param_grid:
+    alpha: [0.1, 1.0, 10.0]
+gbs:
+  backend: cached
+  namespace: hardware               # 真机命名空间：按 batch_id 只读复用
+  batch_id: hw-5M-b0
+  sample_store: sample_store/
+  n_temporal: 511
+  n_spatial: 16
+  n_shots: 200000                   # 子采样语义：取批次前 200000 shots
+encoder:
+  n_bins_a: 255
+  n_bins_b: 256
+  partition_boundary: 255
+  mapping_id: "identity"
+blending:
+  enabled: true                     # ρ 混合（基准为同折内 C2 口径 ridge）
+  uncertainty_enabled: false
+data:
+  adapter: csv
+  store_dir: data_store/
+  start: "2023-01-03"
+  end: "2025-12-31"
+  pool: zz800
+  market_index: "000906.SH"
+  constraints_config: default       # 占位约束成本（待中信确认）
+  rf_annual: 0.02                   # 占位待中信
+  data_version: "zxzz800-2023-2025-v1"
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}  # 冻结协议 P1

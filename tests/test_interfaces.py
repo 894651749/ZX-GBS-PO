@@ -7,9 +7,11 @@ import pandas as pd
 import pytest
 
 from qgbs.data.adapters.mock import MockAdapter
+from qgbs.gbs.backends.base import BatchMeta, SampleBatch
 from qgbs.gbs.backends.permuted import PermutedBackend
 from qgbs.gbs.backends.simulator import GaussianSimulatorBackend, SimulatorConfig
 from qgbs.gbs.encoder import EncoderParams, QuantileEncoder, ensure_default_mappings
+from qgbs.gbs.statistics import second_order_stats
 
 ADAPTER_METHODS = (
     "load_asset_pool_history",
@@ -48,6 +50,25 @@ def test_permuted_backend_wraps_sampler() -> None:
     # 逐列置换精确保持边际统计
     assert np.allclose(raw.samples.mean(axis=0), perm.samples.mean(axis=0))
     assert perm.samples.shape == raw.samples.shape
+    # 同 seed 确定性可复现
+    assert np.array_equal(backend.permute(raw).samples, perm.samples)
+
+
+def test_permuted_backend_breaks_joint_structure() -> None:
+    """置换破坏联合结构：植入完全相关的两列，置换后二阶联合显著削弱。"""
+    n = 5000
+    base_col = (np.arange(n) % 2).astype(np.uint8)  # 边际 0.5 的确定列
+    samples = np.tile(base_col[:, None], (1, 8))
+    meta = BatchMeta(
+        batch_id="t", device_version="t", n_modes=8, n_shots=n,
+        started_at="t", finished_at="t", source="simulation", calibration_session_id="t",
+    )
+    batch = SampleBatch(meta=meta, samples=samples)
+    assert second_order_stats(batch, "joint")[0, 1] == pytest.approx(0.5)  # 完全共同点击
+    perm = PermutedBackend(GaussianSimulatorBackend(SimulatorConfig(n_temporal=4, n_spatial=2, seed=0)), seed=1).permute(batch)
+    joint_p = second_order_stats(perm, "joint")
+    assert joint_p[0, 1] == pytest.approx(0.25, abs=0.02)  # 独立化 → p0·p1
+    assert np.allclose(perm.samples.mean(axis=0), 0.5)  # 边际不变
 
 
 def test_quantile_encoder_freeze_semantics() -> None:

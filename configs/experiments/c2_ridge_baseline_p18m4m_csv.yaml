@@ -1,0 +1,23 @@
+# E1.2 滚动协议对照（P2），其余与 c2_ridge_baseline_csv.yaml 逐字段一致
+# C2（真实数据）：原始金融特征 + 岭回归，线性监督学习基线
+# 冒烟用途：验证真实数据上 特征→标签→读出→回测 全监督链路。
+experiment_id: C2
+features: [finance_base]
+readout: ridge
+cov_method: ledoit_wolf
+label_horizon: 21                   # 标签前视窗（交易日），与月度调仓对齐
+search:
+  param_grid:
+    alpha: [0.1, 1.0, 10.0]         # ridge 正则强度小网格（valid 窗选优）
+blending: {enabled: false}
+data:
+  adapter: csv
+  store_dir: data_store/            # ETL 产物目录（见 data_store/MANIFEST.md）
+  start: "2023-01-03"
+  end: "2025-12-31"
+  pool: zz800                       # 中证800 全集（2025 年末快照，非 PIT）
+  market_index: "000906.SH"         # 中证800 指数作为市场因子
+  constraints_config: default       # 占位约束成本（待中信确认）
+  rf_annual: 0.02                   # 占位待中信：现金管理年化收益率
+  data_version: "zxzz800-2023-2025-v1"
+rolling: {train: "18m", valid: "4m", test: "1m", purge: "5d", embargo: "2d"}  # E1.2 协议 P2

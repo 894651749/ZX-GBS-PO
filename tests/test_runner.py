@@ -52,6 +52,13 @@ def test_runner_end_to_end(tiny_result: ExperimentResult) -> None:
     # 预测层指标应有值（mock 上数值不重要，但必须非 NaN）
     assert np.isfinite(r.metrics["rank_ic_mean"])
     assert np.isfinite(r.metrics["direction_accuracy"])
+    # 归因导出：组合集中度与逐再平衡日 IC
+    assert 0.0 < r.metrics["hhi_mean"] <= 1.0
+    ic_per_date = r.extra["ic_per_date"]
+    assert len(ic_per_date) >= 3
+    assert float(np.mean(list(ic_per_date.values()))) == pytest.approx(
+        r.metrics["rank_ic_mean"]
+    )
 
 
 def metrics_equal_nan_safe(m1: dict, m2: dict) -> bool:

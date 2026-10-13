@@ -125,3 +125,17 @@ def test_mapping_batch_stability_rejects_empty_batches() -> None:
     """空 batches 输入应在入口抛出清晰 ValueError，而非在后续统计处崩溃。"""
     with pytest.raises(ValueError, match="batches 为空"):
         mapping_batch_stability({}, [])
+
+
+def test_quantile_linear_matches_numpy() -> None:
+    """向量化分位数插值与 np.quantile（linear）数值一致（性能修复的等价性）。"""
+    from qgbs.experiments.diagnostics import _quantile_linear
+
+    rng = np.random.default_rng(0)
+    ref = np.sort(rng.normal(size=1000))
+    q = rng.random(5000)
+    got = _quantile_linear(ref, q)
+    want = np.quantile(ref, q)
+    assert np.abs(got - want).max() < 1e-12
+    # 端点
+    assert _quantile_linear(ref, np.array([0.0, 1.0])) == pytest.approx([ref[0], ref[-1]])

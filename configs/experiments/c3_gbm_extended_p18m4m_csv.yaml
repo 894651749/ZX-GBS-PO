@@ -1,0 +1,26 @@
+# E1.2 滚动协议对照（P2），其余与 c3_gbm_baseline_extended_csv.yaml 逐字段一致
+# C3-extended（真实数据）：扩展金融特征集（20 维）+ 梯度提升树
+# E1.1 对照：与 c3_gbm_baseline_csv.yaml 仅 features 段不同（finance_set: extended），
+# 其余逐字段一致。按路径运行，不注册 registry。
+experiment_id: C3
+features: {families: [finance_base], finance_set: extended}
+readout: gbm
+cov_method: ledoit_wolf
+label_horizon: 21
+readout_params:
+  params: {max_iter: 100, max_depth: 3, learning_rate: 0.1, random_state: 42}  # sklearn HGB
+search:
+  param_grid:
+    learning_rate: [0.05, 0.1]
+blending: {enabled: false}
+data:
+  adapter: csv
+  store_dir: data_store/            # ETL 产物目录（见 data_store/MANIFEST.md）
+  start: "2023-01-03"
+  end: "2025-12-31"
+  pool: zz800                       # 中证800 全集（2025 年末快照，非 PIT）
+  market_index: "000906.SH"         # 中证800 指数作为市场因子（extended 市场状态特征同源）
+  constraints_config: default       # 占位约束成本（待中信确认）
+  rf_annual: 0.02                   # 占位待中信：现金管理年化收益率
+  data_version: "zxzz800-2023-2025-v1"
+rolling: {train: "18m", valid: "4m", test: "1m", purge: "5d", embargo: "2d"}  # E1.2 协议 P2

@@ -108,7 +108,12 @@ class GBSFeatureService:
         if not train_batches:
             raise ValueError("train_batches 为空")
         kinds = self.config.stat_kinds
-        X = np.concatenate([np.asarray(b.samples) for b in train_batches], axis=0)
+        # 单批次直接引用（零拷贝）；多批次才拼接
+        X = (
+            np.asarray(train_batches[0].samples)
+            if len(train_batches) == 1
+            else np.concatenate([np.asarray(b.samples) for b in train_batches], axis=0)
+        )
         joint_batch = SampleBatch(meta=_merged_meta(train_batches), samples=X)
         if "marginal" in kinds:
             self._marginal = marginal_stats(joint_batch)
@@ -140,6 +145,15 @@ class GBSFeatureService:
         if self.compression is not None:
             frozen.compression = self.compression.freeze()
         return frozen
+
+    def vocab_snapshot(self) -> "GBSFeatureService":
+        """词表快照：浅拷贝共享统计量词表（_marginal/_corr/_basis_rates 只读）、
+        清空地址行缓存。供跨折复用词表（同一采样批次词表与折无关）。"""
+        if not self._fitted:
+            raise RuntimeError("GBSFeatureService 未 fit，无法快照词表")
+        snap = copy.copy(self)
+        snap._cache = {}
+        return snap
 
     @property
     def is_frozen(self) -> bool:

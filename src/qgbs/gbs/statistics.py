@@ -20,11 +20,32 @@ def marginal_stats(batch: SampleBatch, calibration: np.ndarray | None = None) ->
         calibration: 经装置标定的各模式响应系数（标定会话产物）。
             提供时返回标准化响应（click 概率除以标定响应）；为空返回原始边际。
     """
-    marg = np.asarray(batch.samples, dtype=float).mean(axis=0)
+    # 整型累加再转 float：与 mean 数值一致，避免 0/1 大矩阵物化为 float64
+    X = np.asarray(batch.samples)
+    marg = X.sum(axis=0, dtype=np.uint64).astype(float) / X.shape[0]
     if calibration is not None:
         cal = np.asarray(calibration, dtype=float)
         marg = np.where(cal > 0, marg / np.where(cal > 0, cal, 1.0), 0.0)
     return marg
+
+
+_SECOND_ORDER_CHUNK_ROWS = 20_000  # 分块行数（float32 块 ≈ 0.65GB @8176 模式）
+
+
+def _gram_and_colsum(X: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """分块累加 Gram 矩阵 G = XᵀX（float64）与列和（uint64），避免全量 float 物化。
+
+    0/1 样本下块内部分和为不超过块行数的整数（< 2^24），块转 float32 的
+    matmul 累加无舍入，G 各元素为精确整数；分块与全量结果 bit 级一致。
+    """
+    n, n_modes = X.shape
+    G = np.zeros((n_modes, n_modes), dtype=np.float64)
+    colsum = np.zeros(n_modes, dtype=np.uint64)
+    for s in range(0, n, _SECOND_ORDER_CHUNK_ROWS):
+        blk = X[s : s + _SECOND_ORDER_CHUNK_ROWS]
+        colsum += blk.sum(axis=0, dtype=np.uint64)
+        G += blk.astype(np.float32).T @ blk
+    return G, colsum
 
 
 def second_order_stats(
@@ -33,15 +54,20 @@ def second_order_stats(
 ) -> np.ndarray:
     """二阶统计，形状 (n_modes, n_modes)。
 
+    分块累加 G = XᵀX 后按口径推导：joint = G/n；协方差 = (G − ccᵀ/n)/(n−1)
+    （与 np.cov 的 ddof=1 口径一致）；correlation 零方差模式处置为 0。
+
     Args:
         kind: "joint" 联合 click 概率；"covariance" 模式对协方差；
             "correlation" 相关系数/归一化关联量（零方差模式处置为 0）。
     """
-    X = np.asarray(batch.samples, dtype=float)
+    X = np.asarray(batch.samples)
     n = X.shape[0]
+    G, colsum = _gram_and_colsum(X)
     if kind == "joint":
-        return (X.T @ X) / n
-    cov = np.cov(X.T)
+        return G / n
+    c = colsum.astype(np.float64)
+    cov = (G - np.outer(c, c) / n) / (n - 1)
     if kind == "covariance":
         return cov
     if kind == "correlation":

@@ -15,6 +15,10 @@ C0 在 mock 下以"样本均值 + 样本协方差经典 Markowitz"占位实现�
 真正的 C0 复现需中信 baseline_results（load_baseline_results 交付物）。
 Q1-Q4 已实现：GBS 特征族（gbs_*）统一走仿真样本库 cached 后端
 （近似仿真口径，不替代真机；真机结论需 hardware 后端 + 方案书 §7.1 诊断）。
+真机样本链路：批次先经 scripts/ingest_hardware_samples.py 入库
+（hardware 命名空间 packed.npy），实验配置以 ``gbs.backend: cached`` +
+``gbs.namespace: hardware`` + ``gbs.batch_id`` 按路径直跑（不入 registry，
+如 configs/experiments/q1_marginal_hardware.yaml）。
 """
 
 from __future__ import annotations
@@ -39,11 +43,13 @@ from qgbs.backtest.metrics import (
     rank_ic,
     sharpe,
     sortino,
+    weight_concentration,
 )
 from qgbs.backtest.rolling import WindowSpec, rolling_splits
 from qgbs.data.adapters.csv_adapter import CsvAdapter
 from qgbs.data.adapters.mock import MockAdapter, MockDataConfig
 from qgbs.data.calendar import rebalance_dates
+from qgbs.experiments.diagnostics import GaussianCopulaMatchedFeatures
 from qgbs.factors.finance import build_finance_features
 from qgbs.factors.neutralization import MARKET_COL, JointFactorModel, build_alpha_label
 from qgbs.factors.pipeline import FactorPipeline
@@ -267,43 +273,67 @@ def _assemble_features(
     return pd.concat(parts, axis=1)
 
 
+def _check_mode_config(batch_id: str, batch: SampleBatch, n_temporal: int, n_spatial: int) -> None:
+    """样本版本管理正确性：命中批次的模式结构必须与当前配置一致，
+    不一致说明 batch_id 规则漂移或库存被污染，显式报错而非静默复用。"""
+    mc = batch.meta.mode_config
+    if (
+        int(mc.get("n_temporal", -1)) != n_temporal
+        or int(mc.get("n_spatial", -1)) != n_spatial
+    ):
+        raise ValueError(
+            f"样本库批次 {batch_id!r} 模式结构不一致：库存为 "
+            f"{mc.get('n_temporal')}×{mc.get('n_spatial')}，"
+            f"当前配置 {n_temporal}×{n_spatial}；请检查样本库"
+        )
+
+
 def _prepare_gbs_backend(cfg: dict[str, Any]) -> tuple[CachedBackend, SampleBatch]:
-    """准备 GBS 后端：检查样本库，不存在则用 simulator 生成入库（可复现）。"""
+    """准备 GBS 后端：检查样本库，不存在则用 simulator 生成入库（可复现）。
+
+    ``gbs.backend: cached`` 且 ``gbs.namespace: hardware`` 时按 ``gbs.batch_id``
+    直接挂真机批次（只读复用，跳过 batch_id 派生与仿真生成）。
+    """
     gbs_cfg = dict(cfg.get("gbs") or {})
+    n_temporal = int(gbs_cfg.get("n_temporal", 32))
+    n_spatial = int(gbs_cfg.get("n_spatial", 9))
+    n_shots = int(gbs_cfg.get("n_shots", 20_000))
+    store_root = gbs_cfg.get("sample_store")
+    store = SampleStore(PROJECT_ROOT / store_root) if store_root else SampleStore()
+    if (
+        str(gbs_cfg.get("backend", "")) == "cached"
+        and str(gbs_cfg.get("namespace", "simulation")) == "hardware"
+    ):
+        batch_id = str(gbs_cfg.get("batch_id") or "")
+        if not batch_id:
+            raise ValueError(
+                "gbs.backend='cached' 且 gbs.namespace='hardware' 时必须配置 gbs.batch_id"
+            )
+        backend = CachedBackend(store, batch_id)
+        batch = backend.sample(n_shots)
+        _check_mode_config(batch_id, batch, n_temporal, n_spatial)
+        return backend, batch
+
     sim_cfg = SimulatorConfig(
-        n_temporal=int(gbs_cfg.get("n_temporal", 32)),
-        n_spatial=int(gbs_cfg.get("n_spatial", 9)),
+        n_temporal=n_temporal,
+        n_spatial=n_spatial,
         seed=int(gbs_cfg.get("seed", cfg.get("seed", 42))),
         system_efficiency=float(gbs_cfg.get("system_efficiency", 0.7)),
         mean_click_rate=float(gbs_cfg.get("mean_click_rate", 0.3)),
     )
-    n_shots = int(gbs_cfg.get("n_shots", 20_000))
     # batch_id 由配置字符串确定性派生（规则与 GaussianSimulatorBackend.sample
     # 的 BatchMeta 构造一致，见 simulator.py），样本库命中时无需实际采样
     batch_id = (
         f"sim-{sim_cfg.method}-{sim_cfg.n_temporal}x{sim_cfg.n_spatial}"
         f"-s{sim_cfg.seed}-n{n_shots}-eta{sim_cfg.system_efficiency}"
     )
-    store_root = gbs_cfg.get("sample_store")
-    store = SampleStore(PROJECT_ROOT / store_root) if store_root else SampleStore()
     existing = store.list_batches(namespace="simulation")
     if len(existing) == 0 or batch_id not in set(existing["batch_id"]):
         # 样本缺失时才用 simulator 实际采样入库
         store.register_batch(GaussianSimulatorBackend(sim_cfg).sample(n_shots))
     backend = CachedBackend(store, batch_id)
     batch = backend.sample(n_shots)
-    # 样本版本管理正确性：命中批次的模式结构必须与当前配置一致，
-    # 不一致说明 batch_id 规则漂移或库存被污染，显式报错而非静默复用
-    mc = batch.meta.mode_config
-    if (
-        int(mc.get("n_temporal", -1)) != sim_cfg.n_temporal
-        or int(mc.get("n_spatial", -1)) != sim_cfg.n_spatial
-    ):
-        raise ValueError(
-            f"样本库批次 {batch_id!r} 模式结构不一致：库存为 "
-            f"{mc.get('n_temporal')}×{mc.get('n_spatial')}，"
-            f"当前配置 {sim_cfg.n_temporal}×{sim_cfg.n_spatial}；请检查样本库"
-        )
+    _check_mode_config(batch_id, batch, sim_cfg.n_temporal, sim_cfg.n_spatial)
     return backend, batch
 
 
@@ -320,6 +350,12 @@ def _slice_addresses(addr: ModeAddress, row_mask: np.ndarray) -> ModeAddress:
     )
 
 
+# GBS 统计量词表进程内缓存：键为 (batch_id, n_shots, stat_kinds, activation,
+# basis 参数, n_modes, n_features)，值为 fit 后的词表快照（vocab_snapshot，
+# 大数组共享引用）。滚动折间词表输入不变，命中即跳过分块统计重算。
+_VOCAB_CACHE: dict[tuple, "GBSFeatureService"] = {}
+
+
 def _build_gbs_panel(
     cfg: dict[str, Any],
     gbs_families: list[str],
@@ -328,7 +364,12 @@ def _build_gbs_panel(
     backend: CachedBackend,
     batch: SampleBatch,
 ) -> pd.DataFrame:
-    """构建 GBS 特征面板：encoder 训练窗 fit/freeze → 地址 → 特征服务。"""
+    """构建 GBS 特征面板：encoder 训练窗 fit/freeze → 地址 → 特征服务。
+
+    统计量词表跨折缓存：fit 的词表输入（采样批次、stat_kinds、activation、
+    basis 参数、模式数、特征数）在滚动折间不变，命中 ``_VOCAB_CACHE`` 时
+    跳过分块统计重算（词表本体进程内只存一份，浅拷贝共享引用）。
+    """
     enc_cfg = dict(cfg.get("encoder") or {})
     gbs_cfg = dict(cfg.get("gbs") or {})
     n_temporal = int(gbs_cfg.get("n_temporal", 32))
@@ -352,23 +393,39 @@ def _build_gbs_panel(
         stat_kinds.append("marginal")
     if "gbs_second_order" in gbs_families:
         stat_kinds.append("second_order")
-    basis = None
+    bcfg: dict[str, Any] = {}
     if "gbs_higher_order" in gbs_families:
         stat_kinds.append("higher_order")
         known = set(BasisSelectionParams.__dataclass_fields__)
         bcfg = {k: v for k, v in (cfg.get("basis") or {}).items() if k in known}
-        basis = select_higher_order_basis(
-            batch, tuple(range(backend.n_modes)), BasisSelectionParams(**bcfg)
-        )
 
     addresses = enc.transform(feats_p)
-    service = GBSFeatureService(
-        GBSFeatureConfig(
-            stat_kinds=tuple(stat_kinds),
-            activation=str(gbs_cfg.get("activation", "soft")),
-        ),
+    vocab_key = (
+        batch.meta.batch_id,
+        batch.meta.n_shots,
+        tuple(stat_kinds),
+        str(gbs_cfg.get("activation", "soft")),
+        tuple(sorted(bcfg.items())),
+        backend.n_modes,
+        feats_p.shape[1],
     )
-    service.fit(_slice_addresses(addresses, train_mask), [batch], basis=basis)
+    proto = _VOCAB_CACHE.get(vocab_key)
+    if proto is None:
+        basis = None
+        if "gbs_higher_order" in gbs_families:
+            basis = select_higher_order_basis(
+                batch, tuple(range(backend.n_modes)), BasisSelectionParams(**bcfg)
+            )
+        service = GBSFeatureService(
+            GBSFeatureConfig(
+                stat_kinds=tuple(stat_kinds),
+                activation=str(gbs_cfg.get("activation", "soft")),
+            ),
+        )
+        service.fit(_slice_addresses(addresses, train_mask), [batch], basis=basis)
+        _VOCAB_CACHE[vocab_key] = service.vocab_snapshot()
+    else:
+        service = proto.vocab_snapshot()
     service.precompute_cache(addresses)
     service = service.freeze()
     return service.build_features(addresses, feats_p.index)
@@ -434,7 +491,12 @@ def run_experiment(config_path: Path) -> ExperimentResult:
     pool = adapter.load_asset_pool_history(data_cfg.get("pool", "pool100"))
     stock_records = pool.records[~pool.records["is_cash_asset"]]
     symbols = sorted(stock_records["symbol"].unique())
-    industry = stock_records.set_index("symbol")["citics_industry_l1"]
+    # 区间表成分（逐期重建业务池）同一 symbol 有多行记录：行业映射按 symbol 去重，
+    # 行业漂移（同一 symbol 对应多个行业代码）显式报错而非静默取首行
+    ind_dedup = stock_records.drop_duplicates("symbol")
+    if (stock_records.groupby("symbol")["citics_industry_l1"].nunique() > 1).any():
+        raise ValueError("资产池成分存在行业漂移（同一 symbol 多个 citics_industry_l1），请检查池文件")
+    industry = ind_dedup.set_index("symbol")["citics_industry_l1"]
     market = adapter.load_daily_market(symbols, data_start, data_end)
     status = adapter.load_trading_status(symbols, data_start, data_end)
     msf = adapter.load_market_sector_factor(data_start, data_end)
@@ -451,9 +513,18 @@ def run_experiment(config_path: Path) -> ExperimentResult:
         )
     factor_df = pd.concat([msf.index_returns[mkt_code].rename(MARKET_COL), msf.industry_index_returns], axis=1)
 
-    # 因果特征，全样本计算安全；finance_set=extended 时市场状态特征用市场指数收益
+    # 因果特征，全样本计算安全；finance_set=extended 时市场状态特征用市场指数收益；
+    # extended_plus 额外需要行业指数收益/行业映射/交易状态（E4.4 三个新族）
+    feat_kwargs: dict[str, Any] = {}
+    if finance_set == "extended_plus":
+        feat_kwargs = {
+            "industry_index_returns": msf.industry_index_returns,
+            "industry_map": industry,
+            "status": status,
+        }
     feats = build_finance_features(
-        market, feature_set=finance_set, market_returns=msf.index_returns[mkt_code]
+        market, feature_set=finance_set, market_returns=msf.index_returns[mkt_code],
+        **feat_kwargs,
     )
     spec = WindowSpec(**{k: cfg["rolling"][k] for k in ("train", "valid", "test", "purge", "embargo")})
     horizon = int(cfg.get("label_horizon", 21))
@@ -500,6 +571,7 @@ def run_experiment(config_path: Path) -> ExperimentResult:
     dir_rows: dict[pd.Timestamp, float] = {}
     unc_rows: dict[pd.Timestamp, pd.Series] = {}
     rho_per_fold: list[float] = []
+    readout_search_folds: list[dict[str, Any]] = []  # 逐折 readout 超参搜索选中项（valid 评分口径）
     opt_sel_folds: list[dict[str, Any]] = []
     fold_rets: list[pd.Series] = []
     fold_turns: list[pd.Series] = []
@@ -520,10 +592,24 @@ def run_experiment(config_path: Path) -> ExperimentResult:
         pipe.fit(feats[train_mask].dropna())
         feats_p = pipe.transform(feats)
         X_all = _assemble_features(cfg, feats_p, split.train)
-        if gbs_families:
+        real_gbs = [f for f in gbs_families
+                    if f in ("gbs_marginal", "gbs_second_order", "gbs_higher_order")]
+        if real_gbs:
             assert backend is not None and gbs_batch is not None
-            gbs_panel = _build_gbs_panel(cfg, gbs_families, feats_p, split, backend, gbs_batch)
+            gbs_panel = _build_gbs_panel(cfg, real_gbs, feats_p, split, backend, gbs_batch)
             X_all = pd.concat([X_all, gbs_panel], axis=1)
+        if "gbs_matched_marginal" in gbs_families:
+            # 匹配随机特征对照族（§7.5 归因条款，E4.4）：训练期拟合真机 GBS 边际
+            # 面板的逐列边际与协方差，生成等维随机面板——内容与真实 (date,symbol)
+            # 无关（防泄漏：fit 只用 train 窗），用于判定 GBS 增量可否由"低阶统计
+            # 匹配 + 随机升维"复现。词表经 _build_gbs_panel 缓存与 Q1H 同键共享。
+            assert backend is not None and gbs_batch is not None
+            marg_panel = _build_gbs_panel(cfg, ["gbs_marginal"], feats_p, split, backend, gbs_batch)
+            gen = GaussianCopulaMatchedFeatures(seed=int(cfg.get("seed", 42))).fit(
+                marg_panel[train_mask].dropna())
+            matched = gen.sample(feats_p.index)
+            matched.columns = [f"{c}_matched" for c in matched.columns]
+            X_all = pd.concat([X_all, matched], axis=1)
 
         # 防泄漏：train 标签前视窗不得伸入 valid 窗，train/valid 标签前视窗
         # 不得伸入 test 窗（避免验证评分与测试评估的乐观偏差）
@@ -562,6 +648,12 @@ def run_experiment(config_path: Path) -> ExperimentResult:
             grid = search_cfg["param_grid"]
             res = search_hyperparams(model_name, X_tr, y_tr, X_va, y_va, grid, fixed_params=best)
             best = {**best, **res.best_params}
+            readout_search_folds.append(
+                {"split_id": split.split_id, "best_params": dict(res.best_params),
+                 "valid_score": float(res.valid_score),
+                 "grid_valid_ic_min": float(res.search_log["valid_rank_ic"].min()),
+                 "grid_valid_ic_max": float(res.search_log["valid_rank_ic"].max())}
+            )
         if model_name == "ridge":
             model: ReadoutModel = RidgeReadout(alpha=float(best.get("alpha", 1.0)))
         else:
@@ -595,7 +687,13 @@ def run_experiment(config_path: Path) -> ExperimentResult:
             base_alpha = float(base_res.best_params.get("alpha", 1.0))
             # valid 窗上用 train-only 模型估计 ρ（避免用重训后模型造成乐观偏差）
             base_tr = RidgeReadout(alpha=base_alpha).fit(X_tr[finance_cols], y_tr)
-            rho = estimate_rho(model_tr.predict(X_va), base_tr.predict(X_va[finance_cols]), y_va)
+            rho = estimate_rho(
+                model_tr.predict(X_va), base_tr.predict(X_va[finance_cols]), y_va,
+                selection=str(blend_cfg.get("rho_selection", "point")),
+                n_bootstrap=int(blend_cfg.get("rho_n_bootstrap", 2000)),
+                block_length=int(blend_cfg.get("rho_block_length", 5)),
+                seed=data_seed,
+            )
             rho_per_fold.append(rho)
             base_model = RidgeReadout(alpha=base_alpha).fit(
                 train_all[finance_cols][fit_mask], y_all[fit_mask]
@@ -777,6 +875,7 @@ def run_experiment(config_path: Path) -> ExperimentResult:
         "max_drawdown": max_drawdown(bt.nav),
         "turnover_mean": float(bt.turnover.mean()) if len(bt.turnover) else float("nan"),
         "total_cost": float(bt.costs.sum()) if len(bt.costs) else 0.0,
+        "hhi_mean": float(weight_concentration(bt.weights).mean()) if len(bt.weights) else float("nan"),
         "n_rebalances": float(len(bt.weights)),
         "n_folds": float(n_folds),
         "rho_mean": float(np.mean(rho_per_fold)) if rho_per_fold else float("nan"),
@@ -794,6 +893,12 @@ def run_experiment(config_path: Path) -> ExperimentResult:
         extra={
             "config": {k: v for k, v in cfg.items() if not k.startswith("_")},
             "rho_per_fold": rho_per_fold,
+            "readout_search": {
+                "score": "valid 窗逐日 rank IC 均值（train 拟合 valid 评分）",
+                "folds": readout_search_folds,
+            },
+            # 逐再平衡日 rank IC（归因分析用；折归属可由日期推断）
+            "ic_per_date": {str(d.date()): float(v) for d, v in ic_rows.items()},
             "optimizer_selection": {
                 "search_active": bool(opt_search_active),
                 "score": "valid 窗扣成本净收益（BacktestEngine 口径）",

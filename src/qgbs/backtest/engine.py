@@ -89,7 +89,9 @@ class BacktestEngine:
 
         Args:
             market: 日频行情长表（close/daily_return/amount 列）。
-            status: 日频交易状态长表（buyable/sellable 判定可交易性）。
+            status: 日频交易状态长表（buyable=False 禁止加仓、sellable=False
+                冻结持仓；buyable=False 且 sellable=True 的持仓只减不增——
+                派生业务池非成分期即按此标记）。
             risk_free_daily: 现金部分的日化利率。
             alpha_panel: 再平衡日 × symbol 的 alpha 预测表；提供时仅在这些
                 日期调仓；为空走内置基线信号（历史均值 z-score）。
@@ -104,7 +106,7 @@ class BacktestEngine:
         ret = market.rows.pivot(index="trade_date", columns="symbol", values="daily_return").sort_index()
         amount = market.rows.pivot(index="trade_date", columns="symbol", values="amount").sort_index()
         dates = close.index
-        tradable = self._tradable_mask(status, close)
+        buyable, sellable = self._trade_status_masks(status, close)
 
         if alpha_panel is not None:
             rebal = [d for d in alpha_panel.index if d in dates]
@@ -144,7 +146,7 @@ class BacktestEngine:
 
             if d in rebal:
                 w, cash, cost_frac, to, info = self._rebalance(
-                    d, close, ret, tradable, w, cash, alpha_panel,
+                    d, close, ret, buyable, sellable, w, cash, alpha_panel,
                     amount.loc[d] if d in amount.index else None,
                     exposure_matrix,
                     alpha_uncertainty_panel.loc[d] if (
@@ -174,11 +176,21 @@ class BacktestEngine:
             ledger=pd.DataFrame(ledger_rows),
         )
 
-    def _tradable_mask(self, status: TradingStatus, close: pd.DataFrame) -> pd.DataFrame:
+    @staticmethod
+    def _align_mask(df: pd.DataFrame, close: pd.DataFrame) -> pd.DataFrame:
+        return df.reindex(index=close.index, columns=close.columns).fillna(False).astype(bool)
+
+    def _trade_status_masks(
+        self, status: TradingStatus, close: pd.DataFrame
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+        """buyable / sellable 两个布尔矩阵（交易日 × symbol）。
+
+        分开返回以支持"只卖不买"语义：buyable=False 且 sellable=True 的
+        股票（如派生业务池的非成分期）允许减仓但不允许加仓。
+        """
         buy = status.rows.pivot(index="trade_date", columns="symbol", values="buyable")
         sell = status.rows.pivot(index="trade_date", columns="symbol", values="sellable")
-        tradable = (buy & sell).reindex(index=close.index, columns=close.columns)
-        return tradable.fillna(False).astype(bool)
+        return self._align_mask(buy, close), self._align_mask(sell, close)
 
     def _alpha_at(
         self,
@@ -201,7 +213,8 @@ class BacktestEngine:
         d: pd.Timestamp,
         close: pd.DataFrame,
         ret: pd.DataFrame,
-        tradable: pd.DataFrame,
+        buyable: pd.DataFrame,
+        sellable: pd.DataFrame,
         w: pd.Series,
         cash: float,
         alpha_panel: pd.DataFrame | None,
@@ -212,16 +225,18 @@ class BacktestEngine:
         """在调仓日 d（收盘后）计算目标权重、换手与成本。"""
         hist = ret.loc[:d].tail(self.cov_lookback)
         valid_cols = hist.columns[hist.notna().all()]
-        tradable_today = tradable.loc[d]
+        sellable_today = sellable.loc[d]
+        buyable_today = buyable.loc[d]
 
-        # 冻结：持仓但当日不可交易的股票保持漂移后权重
+        # 冻结：持仓且当日不可卖的股票保持漂移后权重（可卖不可买的持仓不冻结，
+        # 进 sleeve 以"只减不增"上限参与优化）
         held = w[w > 1e-12]
-        frozen = held[~tradable_today[held.index].astype(bool)]
+        frozen = held[~sellable_today[held.index].astype(bool)]
         frozen_sum = float(frozen.sum())
 
         sleeve = [
             s for s in valid_cols
-            if tradable_today.get(s, False) and s not in frozen.index
+            if sellable_today.get(s, False) and s not in frozen.index
         ]
         budget = 1.0 - frozen_sum
         if not sleeve or budget <= 1e-9:
@@ -255,7 +270,13 @@ class BacktestEngine:
 
         w_prev_sleeve = w.reindex(sleeve).fillna(0.0) / budget
         cons = PortfolioConstraints(
-            weight_cap={s: min(self.constraints.weight_cap.get(s, 1.0) / budget, 1.0) for s in sleeve},
+            weight_cap={
+                # 只可减仓：buyable=False（如派生业务池非成分期）的持仓上限为当前权重
+                s: min(self.constraints.weight_cap.get(s, 1.0) / budget, 1.0)
+                if buyable_today.get(s, False)
+                else min(float(w_prev_sleeve.get(s, 0.0)), 1.0)
+                for s in sleeve
+            },
             cash_range=(
                 self.constraints.cash_range[0] / budget,
                 min(self.constraints.cash_range[1] / budget, 1.0),

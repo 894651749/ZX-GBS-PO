@@ -1,0 +1,36 @@
+# E4.4 归因闭环主对照：C2ext-plus + 训练期低阶统计匹配的等维随机特征（ridge）
+# 匹配生成只用 train 窗（防泄漏）；与 Q1H-plus 共享真机词表缓存。
+# E4.4 第二步：c2_ridge_extended_p1y3m_csv 的 extended_plus（26 维）变体，仅 features 段不同，读出超参与冻结配置一致
+# E1.2 滚动协议对照（P1），其余与 c2_ridge_baseline_extended_csv.yaml 逐字段一致
+# C2-extended（真实数据）：扩展金融特征集（20 维）+ 岭回归
+# E1.1 对照：与 c2_ridge_baseline_csv.yaml 仅 features 段不同（finance_set: extended），
+# 其余逐字段一致。按路径运行，不注册 registry。
+experiment_id: C2
+features: {families: [finance_base, gbs_matched_marginal], finance_set: extended_plus}
+readout: ridge
+cov_method: ledoit_wolf
+label_horizon: 21                   # 标签前视窗（交易日），与月度调仓对齐
+search:
+  param_grid:
+    alpha: [0.1, 1.0, 10.0]         # ridge 正则强度小网格（valid 窗选优）
+blending: {enabled: false}
+data:
+  adapter: csv
+  store_dir: data_store/            # ETL 产物目录（见 data_store/MANIFEST.md）
+  start: "2023-01-03"
+  end: "2025-12-31"
+  pool: zz800                       # 中证800 全集（2025 年末快照，非 PIT）
+  market_index: "000906.SH"         # 中证800 指数作为市场因子（extended 市场状态特征同源）
+  constraints_config: default       # 占位约束成本（待中信确认）
+  rf_annual: 0.02                   # 占位待中信：现金管理年化收益率
+  data_version: "zxzz800-2023-2025-v1"
+rolling: {train: "1y", valid: "3m", test: "1m", purge: "5d", embargo: "2d"}  # E1.2 协议 P1
+
+gbs:
+  backend: cached
+  namespace: hardware               # 真机命名空间：按 batch_id 只读复用
+  batch_id: hw-5M-b0
+  sample_store: sample_store/
+  n_temporal: 511
+  n_spatial: 16
+  n_shots: 200000                   # 子采样语义：取批次前 200000 shots

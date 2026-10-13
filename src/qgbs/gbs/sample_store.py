@@ -7,8 +7,14 @@
 - 真机与仿真样本使用隔离的命名空间（namespace 由 BatchMeta.source 推导）。
 
 持久化：内存为主；``root`` 非空时每批次落盘
-``{root}/{namespace}/{batch_id}/``（samples.npz 位压缩样本 + meta.json），
-重启后可扫描恢复。选择 npz+json 而非 parquet：避免 pyarrow 依赖。
+``{root}/{namespace}/{batch_id}/``（meta.json + 样本文件），重启后扫描
+恢复（仅建 meta 索引，样本按需加载）。样本文件两种格式：
+
+- ``samples.npz``：位压缩样本（仿真批次，小），选择 npz+json 而非
+  parquet 以避免 pyarrow 依赖；
+- ``packed.npy``：扁平位压缩 .npy（真机大批次，见
+  scripts/ingest_hardware_samples.py），加载端 mmap + reshape 视图、
+  按需切片后再解包，避免全量物化（5M×8176 ≈ 41GB）。
 """
 
 from __future__ import annotations
@@ -49,7 +55,8 @@ class SampleStore:
 
     def __init__(self, root: Path | None = None) -> None:
         self.root = Path(root) if root is not None else None
-        self._batches: dict[str, SampleBatch] = {}
+        self._batches: dict[str, SampleBatch] = {}  # 已物化批次（内存登记或已加载）
+        self._meta_index: dict[str, BatchMeta] = {}  # 全部批次 meta（含磁盘未物化）
         self._versions: dict[str, SampleVersion] = {}
         self._session_major: dict[tuple[str, str], int] = {}
         if self.root is not None and self.root.exists():
@@ -81,7 +88,7 @@ class SampleStore:
     def register_batch(self, batch: SampleBatch) -> SampleVersion:
         """登记一个新批次（内存 + 可选落盘），按标定会话分配版本号。"""
         meta = batch.meta
-        if meta.batch_id in self._batches:
+        if meta.batch_id in self._meta_index:
             raise ValueError(f"批次 {meta.batch_id!r} 已存在，拒绝重复登记")
         namespace = "hardware" if meta.source == "hardware" else "simulation"
         current = self.resolve_version(meta.calibration_session_id, namespace)
@@ -89,26 +96,80 @@ class SampleStore:
             namespace=namespace, major=current.major, minor=current.minor + 1
         )
         self._batches[meta.batch_id] = batch
+        self._meta_index[meta.batch_id] = meta
         self._versions[meta.batch_id] = version
         if self.root is not None:
             self._persist(batch, version)
         return version
 
-    def load_batch(self, batch_id: str) -> SampleBatch:
-        """按批次号读取样本（内存优先，其次磁盘）。"""
+    def get_meta(self, batch_id: str) -> BatchMeta:
+        """读取批次元数据（不物化样本）。"""
+        if batch_id in self._meta_index:
+            return self._meta_index[batch_id]
+        if self.root is not None:
+            for ns in ("simulation", "hardware"):
+                meta_path = self.root / ns / batch_id / "meta.json"
+                if meta_path.exists():
+                    meta = BatchMeta(**json.loads(meta_path.read_text(encoding="utf-8")))
+                    self._meta_index[batch_id] = meta
+                    return meta
+        raise KeyError(f"批次 {batch_id!r} 不存在")
+
+    def load_batch(self, batch_id: str, n_shots: int | None = None) -> SampleBatch:
+        """按批次号读取样本（内存优先，其次磁盘）。
+
+        ``n_shots`` 为 None 时返回整批；指定时返回前 ``n_shots`` 个样本的
+        确定性切片（packed.npy 真机批次按切片加载，避免全量物化）。
+        """
         if batch_id in self._batches:
-            return self._batches[batch_id]
+            return self._slice(self._batches[batch_id], n_shots)
         if self.root is None:
             raise KeyError(f"批次 {batch_id!r} 不存在")
         for ns in ("simulation", "hardware"):
             d = self.root / ns / batch_id
-            if (d / "meta.json").exists():
-                meta = BatchMeta(**json.loads((d / "meta.json").read_text(encoding="utf-8")))
-                packed = np.load(d / "samples.npz")["packed"]
-                batch = SampleBatch(meta=meta, samples=unpack_samples(packed, meta.n_modes))
-                self._batches[batch_id] = batch
-                return batch
+            meta_path = d / "meta.json"
+            if not meta_path.exists():
+                continue
+            meta = self.get_meta(batch_id)
+            packed_npy = d / "packed.npy"
+            if packed_npy.exists():
+                # 真机大批次：mmap 视图 reshape 后按需切片，仅解包请求的行
+                packed = np.load(packed_npy, mmap_mode="r").reshape(
+                    meta.n_shots, meta.n_modes // 8
+                )
+                n = self._resolve_n_shots(meta, n_shots)
+                return SampleBatch(
+                    meta=self._slice_meta(meta, n),
+                    samples=unpack_samples(packed[:n], meta.n_modes),
+                )
+            packed = np.load(d / "samples.npz")["packed"]
+            n = self._resolve_n_shots(meta, n_shots)
+            batch = SampleBatch(
+                meta=self._slice_meta(meta, n),
+                samples=unpack_samples(packed[:n], meta.n_modes),
+            )
+            if n_shots is None:
+                self._batches[batch_id] = batch  # 仿真小批次：加载后缓存（原行为）
+            return batch
         raise KeyError(f"批次 {batch_id!r} 不存在")
+
+    @staticmethod
+    def _resolve_n_shots(meta: BatchMeta, n_shots: int | None) -> int:
+        if n_shots is None:
+            return meta.n_shots
+        if n_shots > meta.n_shots:
+            raise ValueError(
+                f"样本不足：批次 {meta.batch_id!r} 仅有 {meta.n_shots} shots，请求 {n_shots}"
+            )
+        return n_shots
+
+    @staticmethod
+    def _slice_meta(meta: BatchMeta, n: int) -> BatchMeta:
+        return meta if n == meta.n_shots else dataclasses.replace(meta, n_shots=n)
+
+    def _slice(self, batch: SampleBatch, n_shots: int | None) -> SampleBatch:
+        n = self._resolve_n_shots(batch.meta, n_shots)
+        return SampleBatch(meta=self._slice_meta(batch.meta, n), samples=batch.samples[:n])
 
     def list_batches(
         self,
@@ -117,9 +178,8 @@ class SampleStore:
     ) -> pd.DataFrame:
         """列出批次清单（可按命名空间/装置版本过滤），含质量标记与版本。"""
         rows = []
-        for bid, batch in self._batches.items():
+        for bid, m in self._meta_index.items():
             v = self._versions[bid]
-            m = batch.meta
             rows.append(
                 {
                     "batch_id": bid,
@@ -144,13 +204,15 @@ class SampleStore:
 
     def set_quality_flag(self, batch_id: str, key: str, value: object) -> None:
         """更新批次质量标记（如标记某批次不可用）。"""
-        batch = self._batches.get(batch_id) or self.load_batch(batch_id)
-        flags = {**batch.meta.quality_flags, key: value}
-        batch.meta = dataclasses.replace(batch.meta, quality_flags=flags)
+        meta = self.get_meta(batch_id)
+        new_meta = dataclasses.replace(meta, quality_flags={**meta.quality_flags, key: value})
+        self._meta_index[batch_id] = new_meta
+        if batch_id in self._batches:
+            self._batches[batch_id].meta = new_meta
         if self.root is not None:
             v = self._versions[batch_id]
             (self.root / v.namespace / batch_id / "meta.json").write_text(
-                json.dumps(dataclasses.asdict(batch.meta), ensure_ascii=False, indent=2),
+                json.dumps(dataclasses.asdict(new_meta), ensure_ascii=False, indent=2),
                 encoding="utf-8",
             )
 
@@ -169,6 +231,7 @@ class SampleStore:
         )
 
     def _scan_disk(self) -> None:
+        """扫描磁盘建立批次索引：只读 meta.json，不物化样本（按需加载）。"""
         assert self.root is not None
         for ns in ("simulation", "hardware"):
             ns_dir = self.root / ns
@@ -176,13 +239,11 @@ class SampleStore:
                 continue
             for d in sorted(ns_dir.iterdir()):
                 meta_path = d / "meta.json"
-                if not meta_path.exists() or d.name in self._batches:
+                if not meta_path.exists() or d.name in self._meta_index:
                     continue
                 meta = BatchMeta(**json.loads(meta_path.read_text(encoding="utf-8")))
-                packed = np.load(d / "samples.npz")["packed"]
-                batch = SampleBatch(meta=meta, samples=unpack_samples(packed, meta.n_modes))
                 version = self.resolve_version(meta.calibration_session_id, ns)
-                self._batches[d.name] = batch
+                self._meta_index[d.name] = meta
                 self._versions[d.name] = SampleVersion(
                     namespace=ns, major=version.major, minor=version.minor + 1  # type: ignore[arg-type]
                 )
