@@ -1,0 +1,32 @@
+# 中信交付 CSV 数据适配器配置（方案书 §8/§8.4）
+# CsvAdapter(root, config_path) 按本映射读取；root 可由构造参数覆盖。
+files:
+  asset_pool:                       # PIT 成分区间表（生效/失效日期）
+    path: asset_pool.csv
+    required: true
+    date_cols: [effective_date, expiry_date, industry_change_date, industry_rank_date]
+  daily_market:                     # 日频行情长表（symbol, trade_date 联合主键）
+    path: daily_market.csv
+    required: true
+    date_cols: [trade_date]
+  trading_status:                   # 日频交易状态长表
+    path: trading_status.csv
+    required: true
+    date_cols: [trade_date, resume_date, list_date, delist_date]
+  corporate_actions:                # 公司行动（可选）
+    path: corporate_actions.csv
+    required: false
+    date_cols: [ex_date, effective_date, expiry_date, adj_factor_effective_date]
+  market_sector_factor:             # 市场/行业因子长表：trade_date, code, kind, value
+    path: market_sector_factor.csv  # kind ∈ index / industry / risk_free / cash_mgmt
+    required: true
+    date_cols: [trade_date]
+  constraints_costs:                # 约束成本（一行一个 config_id）
+    path: constraints_costs.csv
+    required: true
+  baseline_results:                 # 原模型基线交付物（可选）
+    path: baseline_results.csv
+    required: false
+  field_dict:                       # 字段说明文件（可选）：column, description（中文）
+    path: field_dict.csv
+    required: false

@@ -79,12 +79,12 @@ secrets/
 *.log
 logs/
 
-# ---- 项目数据与产物（体积大，不上传 GitHub）----
-data/
-data_store/
-artifacts/
-sample_store/
-docs-forme/
+# ---- 项目数据与产物（体积大，不上传 GitHub；/ 前缀锚定根目录，避免误伤 src/qgbs/data 等同名源码目录）----
+/data/
+/data_store/
+/artifacts/
+/sample_store/
+/docs-forme/
 *.csv
 *.xlsx
 *.7z
@@ -94,4 +94,4 @@ docs-forme/
 
 # ---- 文档 PDF（如需保留可删除此行）----
 # *.pdf
-data_store_derived/
+/data_store_derived/

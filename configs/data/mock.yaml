@@ -1,0 +1,28 @@
+# Mock 数据配置：开发调试用的合成数据参数（对应 MockDataConfig 全字段）
+adapter: mock
+n_assets: 100                       # 合成股票数（pool100 规模）
+start: "2018-01-01"
+end: "2025-12-31"
+n_industries: 10                    # 中信一级行业数（合成）
+n_sub_industries: 30                # 中信二级行业数（合成）
+n_indices: 3                        # 宽基指数数（合成）
+n_style_factors: 5                  # 风格因子数（合成）
+n_cash_assets: 2                    # 现金资产数
+pool29_size: 29                     # 29 池规模
+suspension_prob: 0.005              # 每日停牌概率
+limit_pct: 0.10                     # 涨跌停幅度
+rf_annual: 0.02                     # 无风险年化利率（常数）
+cash_yield_annual: 0.015            # 现金管理年化收益率（常数）
+# 约束与成本（load_constraints_costs 输出）
+rebalance_freq: "1m"
+commission_bps: 2.5
+stamp_tax_bps: 10.0
+slippage_bps: 5.0
+impact_coef: 0.0                    # 冲击成本系数（默认 0 关闭，保持既有结果口径；链路已接通可测）
+weight_upper: 0.10                  # 个股上限（全池统一）
+cash_range: [0.0, 0.05]
+max_turnover: null
+liquidity_limit: null
+with_corporate_actions: true        # 是否生成分红送转事件
+with_suspension: true               # 是否生成停牌/涨跌停状态
+seed: 42                            # 合成数据随机种子
