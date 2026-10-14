@@ -330,3 +330,107 @@ class QuantileEncoder:
     @property
     def is_frozen(self) -> bool:
         return self._frozen
+
+
+# ---------------------------------------------------------------------------
+# E6：论文级忠实复现的分组分区量化变体（arXiv:2506.19707 原版寻址）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class GroupedModeAddress:
+    """分组寻址结果：A/B 两组各自的模式编号数组。
+
+    A 组（特征 0–15）：mode = bin × n_spatial + feature_idx，∈ [0, 4096)；
+    B 组（特征 16–25）：mode = (partition_offset + bin) × n_spatial +
+    (feature_idx − 16)，∈ [4096, 8176)。两组无碰撞（A/B 时间分区消组间碰撞，
+    组内同 bin 因空间模互异而不撞）。
+    """
+
+    mode_index_a: np.ndarray  # (R, 16) A 组寻址模式
+    mode_index_b: np.ndarray  # (R, 10) B 组寻址模式
+
+
+@dataclass(frozen=True)
+class GroupedEncoderParams:
+    """分组分区量化参数（E6 冻结口径：A 组 256 档 / B 组 255 档）。"""
+
+    n_bins_a: int = 256  # A 组时间模档数（时间模 0–255）
+    n_bins_b: int = 255  # B 组时间模档数（时间模 256–510）
+    group_split: int = 16  # A 组特征数（特征 0–15）；其余进 B 组
+    partition_offset: int = 256  # B 组时间模起点
+    n_spatial: int = 16  # 空间模数（两组共用 16 空间模网格）
+
+
+class GroupedQuantileEncoder:
+    """分组分区量化编码器（E6 论文原版寻址，与 QuantileEncoder 并存不替换）。
+
+    与 QuantileEncoder 的差异：每组独立档数（A 组 256、B 组 255），组内寻址
+    固定为 `(offset + bin) × n_spatial + spatial`，无映射置换——论文原版
+    即为恒等寻址（identity 已在 E3.3 冻结）。
+    """
+
+    def __init__(self, params: GroupedEncoderParams | None = None) -> None:
+        self.params = params or GroupedEncoderParams()
+        self._fitted = False
+        self._frozen = False
+        self._edges: dict[str, np.ndarray] = {}
+        self._fill: pd.Series | None = None
+        self._features: list[str] = []
+
+    def fit(self, X: pd.DataFrame) -> "GroupedQuantileEncoder":
+        """训练窗拟合各特征的分位数边界（A/B 组各自档数）。"""
+        if self._frozen:
+            raise RuntimeError("GroupedQuantileEncoder 已冻结：不允许再 fit")
+        self._features = list(X.columns)
+        p = self.params
+        if len(self._features) <= p.group_split:
+            raise ValueError(
+                f"特征数 {len(self._features)} ≤ group_split={p.group_split}：B 组为空"
+            )
+        Xn = X.fillna(X.median())
+        self._fill = X.median()
+        for j, col in enumerate(self._features):
+            n_bins = p.n_bins_a if j < p.group_split else p.n_bins_b
+            qs = np.linspace(0.0, 1.0, n_bins + 1)[1:-1]
+            self._edges[col] = np.unique(np.quantile(Xn[col].to_numpy(dtype=float), qs))
+        self._fitted = True
+        return self
+
+    def freeze(self) -> "GroupedQuantileEncoder":
+        """冻结编码器（bin 边界锁定），返回不可变副本。"""
+        if not self._fitted:
+            raise RuntimeError("GroupedQuantileEncoder 未 fit，无法 freeze")
+        frozen = copy.deepcopy(self)
+        frozen._frozen = True
+        return frozen
+
+    def transform(self, X: pd.DataFrame) -> GroupedModeAddress:
+        """特征值 → 分组模式地址（越界截断端点 bin；NaN 用训练中位数填充）。"""
+        if not self._frozen:
+            raise RuntimeError("GroupedQuantileEncoder 未冻结：仅允许在 freeze() 副本上 transform")
+        if self._fill is None:
+            raise RuntimeError("GroupedQuantileEncoder 内部状态不完整：须先 fit 再 freeze")
+        X2 = X.reindex(columns=self._features).fillna(self._fill)
+        n_rows = X2.shape[0]
+        p = self.params
+        bins = np.empty((n_rows, len(self._features)), dtype=int)
+        for j, col in enumerate(self._features):
+            bins[:, j] = np.digitize(X2[col].to_numpy(dtype=float), self._edges[col])
+        n_bins = np.array([p.n_bins_a if j < p.group_split else p.n_bins_b
+                           for j in range(len(self._features))])
+        bins = np.clip(bins, 0, n_bins - 1)
+
+        feat_idx = np.arange(len(self._features))
+        a_cols = feat_idx < p.group_split
+        bins_a = bins[:, a_cols]  # (R, 16)
+        bins_b = bins[:, ~a_cols]  # (R, n-16)
+        spatial_a = np.arange(int(a_cols.sum()))
+        spatial_b = np.arange(int((~a_cols).sum()))
+        mode_a = bins_a * p.n_spatial + spatial_a[None, :]
+        mode_b = (p.partition_offset + bins_b) * p.n_spatial + spatial_b[None, :]
+        return GroupedModeAddress(mode_index_a=mode_a, mode_index_b=mode_b)
+
+    @property
+    def is_frozen(self) -> bool:
+        return self._frozen
