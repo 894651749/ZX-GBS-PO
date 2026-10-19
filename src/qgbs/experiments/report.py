@@ -63,6 +63,40 @@ def _stationary_bootstrap_indices(
     return idx
 
 
+def paired_metric_bootstrap_ci(
+    returns_a: pd.Series,
+    returns_b: pd.Series,
+    metric: "Callable[[pd.Series], float]",
+    n_bootstrap: int = 2000,
+    block_length: int = 5,
+    level: float = 0.95,
+    seed: int = 42,
+) -> tuple[float, float, float]:
+    """配对块 bootstrap 指标差 CI（E7.2 组合层推断）。
+
+    两序列按日期 inner join 对齐后，同一组环形块索引同时作用于两序列
+    （保持配对），每次重采样重算 ``metric``（日收益 → 标量，如 Sharpe/
+    IR/Calmar）并取差。返回（点估计差, 下界, 上界）。
+    """
+    df = pd.concat([returns_a.rename("a"), returns_b.rename("b")], axis=1,
+                   join="inner").dropna()
+    n = len(df)
+    if n < 4:
+        raise ValueError(f"样本长度 {n} 太短，无法分块 bootstrap（至少 4）")
+    block_length = max(1, min(int(block_length), n))
+    a = df["a"].to_numpy(dtype=float)
+    b = df["b"].to_numpy(dtype=float)
+    point = float(metric(df["a"]) - metric(df["b"]))
+    rng = np.random.default_rng(seed)
+    idx = _moving_block_indices(n, block_length, n_bootstrap, rng)
+    diffs = np.array(
+        [metric(pd.Series(a[row])) - metric(pd.Series(b[row])) for row in idx]
+    )
+    alpha = 1.0 - level
+    lo, hi = np.quantile(diffs, [alpha / 2.0, 1.0 - alpha / 2.0])
+    return point, float(lo), float(hi)
+
+
 def block_bootstrap_ci(
     returns: pd.Series,
     statistic: str = "sharpe",

@@ -36,9 +36,12 @@ import yaml
 from qgbs.backtest.engine import BacktestEngine, BacktestResult
 from qgbs.backtest.metrics import (
     annual_return,
+    annual_return_geometric,
     annual_volatility,
+    calmar,
     direction_accuracy,
     icir,
+    information_ratio,
     max_drawdown,
     rank_ic,
     sharpe,
@@ -864,15 +867,22 @@ def run_experiment(config_path: Path) -> ExperimentResult:
         )
 
     ic_s = pd.Series(ic_rows).dropna()
+    # 基准序列：IR 用市场指数（data.market_index，如 000906.SH）的日收益
+    bench_ret = msf.index_returns[mkt_code]
     metrics = {
         "rank_ic_mean": float(ic_s.mean()) if len(ic_s) else float("nan"),
         "rank_icir": icir(ic_s),
         "direction_accuracy": float(pd.Series(dir_rows).mean()) if dir_rows else float("nan"),
         "sharpe": sharpe(bt.returns),
         "sortino": sortino(bt.returns),
+        # 客户文档口径：annual_return 为算术年化（mean×252）；几何口径保留为
+        # annual_return_geometric（2026-10-19 前存量产物中的 annual_return 为几何值）
         "annual_return": annual_return(bt.returns),
+        "annual_return_geometric": annual_return_geometric(bt.returns),
         "annual_volatility": annual_volatility(bt.returns),
         "max_drawdown": max_drawdown(bt.nav),
+        "ir": information_ratio(bt.returns, bench_ret),
+        "calmar": calmar(bt.nav),
         "turnover_mean": float(bt.turnover.mean()) if len(bt.turnover) else float("nan"),
         "total_cost": float(bt.costs.sum()) if len(bt.costs) else 0.0,
         "hhi_mean": float(weight_concentration(bt.weights).mean()) if len(bt.weights) else float("nan"),
@@ -899,6 +909,9 @@ def run_experiment(config_path: Path) -> ExperimentResult:
             },
             # 逐再平衡日 rank IC（归因分析用；折归属可由日期推断）
             "ic_per_date": {str(d.date()): float(v) for d, v in ic_rows.items()},
+            # 测试期日频收益与净值序列（E7.2 起落盘，避免组合层指标再回填）
+            "returns": {str(d.date()): float(v) for d, v in bt.returns.items()},
+            "nav": {str(d.date()): float(v) for d, v in bt.nav.items()},
             "optimizer_selection": {
                 "search_active": bool(opt_search_active),
                 "score": "valid 窗扣成本净收益（BacktestEngine 口径）",

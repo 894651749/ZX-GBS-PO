@@ -18,7 +18,21 @@ def total_return(nav: pd.Series) -> float:
 
 
 def annual_return(returns: pd.Series, periods_per_year: int = 252) -> float:
-    """年化收益（几何口径）。"""
+    """年化收益（算术口径：均值 × f）。
+
+    客户《风险调整收益指标计算说明》口径（文档 §六.1：收益年化 ×f、
+    波动率年化 ×√f），与 Sharpe 的算术年化自洽。复合/几何口径见
+    :func:`annual_return_geometric`（存量行为，2026-10-19 前 annual_return
+    为该口径——历史产物中的 annual_return 字段为几何值）。
+    """
+    returns = returns.dropna()
+    if len(returns) == 0:
+        return float("nan")
+    return float(returns.mean() * periods_per_year)
+
+
+def annual_return_geometric(returns: pd.Series, periods_per_year: int = 252) -> float:
+    """年化收益（几何/复合口径）——2026-10-19 前 annual_return 的存量口径。"""
     returns = returns.dropna()
     if len(returns) == 0:
         return float("nan")
@@ -97,15 +111,22 @@ def direction_accuracy(pred: pd.Series, realized: pd.Series) -> float:
     return float((np.sign(df["p"]) == np.sign(df["r"])).mean())
 
 
-def sharpe(returns: pd.Series, periods_per_year: int = 252) -> float:
-    """年化 Sharpe 比率（零无风险利率口径）：均值/标准差 × √N。"""
+def sharpe(
+    returns: pd.Series, periods_per_year: int = 252, risk_free_annual: float = 0.0
+) -> float:
+    """年化 Sharpe 比率（客户文档口径：超额收益均值×f / 波动率×√f）。
+
+    ``risk_free_annual`` 为年化无风险利率 Rf（默认 0 = 存量行为）；
+    Sharpe = (年化收益 − Rf) / 年化波动率，与文档 §二一致。
+    """
     returns = returns.dropna()
     if len(returns) < 2:
         return float("nan")
     std = float(returns.std())
     if std == 0.0:
         return float("nan")
-    return float(returns.mean() / std * np.sqrt(periods_per_year))
+    excess_mean = float(returns.mean()) - risk_free_annual / periods_per_year
+    return excess_mean / std * np.sqrt(periods_per_year)
 
 
 def sortino(returns: pd.Series, periods_per_year: int = 252, mar: float = 0.0) -> float:
@@ -123,12 +144,50 @@ def sortino(returns: pd.Series, periods_per_year: int = 252, mar: float = 0.0) -
 
 
 def max_drawdown(nav: pd.Series) -> float:
-    """最大回撤（净值序列口径，返回非负值）。"""
+    """最大回撤（净值序列口径，返回非负值）。
+
+    客户文档 §四口径：MDD = max_t (Peak_t − V_t)/Peak_t，Peak_t 为历史峰值。
+    """
     if len(nav) < 2:
         return 0.0
     running_max = nav.cummax()
     drawdown = 1.0 - nav / running_max
     return float(drawdown.max())
+
+
+def information_ratio(
+    returns: pd.Series, benchmark_returns: pd.Series, periods_per_year: int = 252
+) -> float:
+    """信息比率（客户文档 §三）：年化主动超额均值 / 年化跟踪误差。
+
+    逐日主动超额 = 组合日收益 − 基准日收益；IR = mean(A)/std(A) × √f。
+    日期对齐用 inner join（基准缺失日直接剔除；000906.SH 在交付区间无
+    缺失，inner 与填充等价），两侧 NaN 同步剔除。
+    """
+    df = pd.concat([returns.rename("r"), benchmark_returns.rename("b")], axis=1,
+                   join="inner").dropna()
+    if len(df) < 2:
+        return float("nan")
+    active = df["r"] - df["b"]
+    te = float(active.std())
+    if te == 0.0:
+        return float("nan")
+    return float(active.mean() / te * np.sqrt(periods_per_year))
+
+
+def calmar(nav: pd.Series, periods_per_year: int = 252) -> float:
+    """Calmar 比率（客户文档 §四）：年化收益率（算术口径）/ 最大回撤。
+
+    年化收益由净值差分的日收益序列按算术口径（mean×f）计算。
+    """
+    nav = nav.dropna()
+    if len(nav) < 2:
+        return float("nan")
+    rets = nav.pct_change().dropna()
+    mdd = max_drawdown(nav)
+    if mdd == 0.0:
+        return float("nan")
+    return float(annual_return(rets, periods_per_year) / mdd)
 
 
 def cvar(returns: pd.Series, level: float = 0.95) -> float:

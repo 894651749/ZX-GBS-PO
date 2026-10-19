@@ -64,6 +64,7 @@ class BacktestEngine:
         min_history: int = 126,
         cov_method: Literal["ledoit_wolf", "sample", "factor"] = "ledoit_wolf",
         factor_risk_config: FactorRiskConfig | None = None,
+        risk_prior_delta: float = 1.0,
     ) -> None:
         self.window_spec = window_spec
         self.constraints = constraints
@@ -74,6 +75,8 @@ class BacktestEngine:
         self.cov_method = cov_method
         # 因子风险模型配置（cov_method="factor" 时生效；None = 类默认值）
         self.factor_risk_config = factor_risk_config
+        # GBS 风险先验混合系数（E8）：δ=1 严格退化为现有 LW 路径（默认行为不变）
+        self.risk_prior_delta = risk_prior_delta
 
     def run(
         self,
@@ -84,6 +87,7 @@ class BacktestEngine:
         rebalance_override: pd.DatetimeIndex | None = None,
         exposure_matrix: pd.DataFrame | None = None,
         alpha_uncertainty_panel: pd.DataFrame | None = None,
+        risk_prior_provider=None,
     ) -> BacktestResult:
         """执行完整滚动回测。
 
@@ -152,6 +156,7 @@ class BacktestEngine:
                     alpha_uncertainty_panel.loc[d] if (
                         alpha_uncertainty_panel is not None and d in alpha_uncertainty_panel.index
                     ) else None,
+                    risk_prior_provider=risk_prior_provider,
                 )
                 nav *= 1.0 - cost_frac
                 weight_rows[d] = w.copy()
@@ -221,6 +226,7 @@ class BacktestEngine:
         day_amount: pd.Series | None = None,
         exposure_matrix: pd.DataFrame | None = None,
         alpha_uncertainty: pd.Series | None = None,
+        risk_prior_provider=None,
     ) -> tuple[pd.Series, float, float, float, dict]:
         """在调仓日 d（收盘后）计算目标权重、换手与成本。"""
         hist = ret.loc[:d].tail(self.cov_lookback)
@@ -259,6 +265,12 @@ class BacktestEngine:
                 cov = frm.covariance()
         else:
             cov = ledoit_wolf_cov(hist[sleeve])
+        # GBS 风险先验混合（E8）：δ<1 且提供先验时 Σ = δ·Σ_LW + (1−δ)·Σ_prior
+        if risk_prior_provider is not None and self.risk_prior_delta < 1.0:
+            from qgbs.gbs.risk_prior import mix_covariance
+            prior = risk_prior_provider(d, sleeve, hist[sleeve])
+            cov = mix_covariance(cov, prior, self.risk_prior_delta)
+            cov_note = (cov_note + "；" if cov_note else "") + f"gbs_prior_δ={self.risk_prior_delta}" 
 
         # alpha 不确定性：与 alpha 同口径截面 z-score（单位一致）
         unc_sleeve = None
