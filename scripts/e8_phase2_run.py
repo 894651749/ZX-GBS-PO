@@ -21,6 +21,7 @@ import pandas as pd
 from qgbs.backtest.engine import BacktestEngine
 from qgbs.backtest.metrics import annual_volatility, calmar, information_ratio, sharpe
 from qgbs.backtest.rolling import WindowSpec, rolling_splits
+from qgbs.backtest.rolling import protocol_splits as protocol_splits_
 from qgbs.data.adapters.csv_adapter import CsvAdapter
 from qgbs.experiments.runner import _build_gbs_panel, _prepare_gbs_backend, load_config
 from qgbs.factors.finance import build_finance_features
@@ -89,6 +90,24 @@ def _run_engine(shared: dict, split, dates, delta, provider, alpha_panel, labels
             "nav": {str(d.date()): float(v) for d, v in bt.nav.items()}}
 
 
+def _safe_fold_ic(pred_panel: pd.DataFrame, labels: pd.Series) -> float:
+    """test 窗逐日 rank IC 均值；空/退化窗口返回 nan 并记日志（不崩）。
+
+    防御点：空面板的 groupby.apply 返回 DataFrame 而非 Series（float() 会崩），
+    故显式判空 + 结果类型校验。
+    """
+    if pred_panel.empty or pred_panel.shape[1] == 0:
+        print("警告：test 窗 alpha 面板为空，rank IC 记 nan", flush=True)
+        return float("nan")
+    pred = pred_panel.stack()
+    if isinstance(pred, pd.DataFrame):  # 异常形态防御
+        pred = pred.squeeze(axis=1)
+    pred.index.names = ["date", "symbol"]  # stack 后 names 丢失，groupby 需要
+    ics = _per_date_rank_ic(pred, labels.reindex(pred.index))
+    arr = np.asarray(ics, dtype=float).ravel()
+    return float(np.nanmean(arr)) if arr.size else float("nan")
+
+
 def _run_fold(split_id: int) -> list[dict]:
     """worker：一折内 Q1 alpha 链 + 四配置评估。"""
     shared = _SHARED
@@ -132,10 +151,9 @@ def _run_fold(split_id: int) -> list[dict]:
         "R2_random": PriorProvider("random_prior", seed=shared["seed"]),
         "R3_static": PriorProvider("static_gbs_prior", static_corr=static_K),
     }
-    # rank IC（四配置共享同一 alpha，风险引擎不改变预测）
+    # rank IC（四配置共享同一 alpha，风险引擎不改变预测）；退化/空窗记 nan 不崩
     pred_te = alpha_panel.loc[alpha_panel.index.isin(te_dates)]
-    y_te = labels.reindex(pred_te.stack().index)
-    ic_te = float(_per_date_rank_ic(pred_te.stack(), y_te).mean())
+    ic_te = _safe_fold_ic(pred_te, labels)
 
     recs = []
     for name, prov in providers.items():
@@ -196,6 +214,12 @@ def main(argv=None) -> None:
     rho_hat = second_order_stats(batch, "correlation")
     print(f"ρ̂ 词表 {time.time()-t0:.0f}s", flush=True)
 
+    # 协议折过滤（剔除 test 窗无再平衡日的尾折）——P1 正式协议 20 折（0–19）
+    spec = WindowSpec(train="1y", valid="3m", test="1m", purge="5d", embargo="2d")
+    protocol_splits = protocol_splits_(close.index, spec)
+    assert len(protocol_splits) == 20, f"协议折数 {len(protocol_splits)} ≠ 20"
+    print(f"协议折：0~{protocol_splits[-1].split_id}", flush=True)
+
     cc = adapter.load_constraints_costs("default")
     _SHARED.update({
         "cfg": cfg, "spec": WindowSpec(train="1y", valid="3m", test="1m", purge="5d", embargo="2d"),
@@ -211,7 +235,7 @@ def main(argv=None) -> None:
         "opt": OptimizerParams(risk_aversion=5.0, turnover_penalty=0.001, l2_regularization=0.0001),
         "rf_daily": 0.02 / 252.0, "bench": msf.index_returns[mkt_code],
         "exposure": pd.get_dummies(industry).astype(float),
-        "splits": {s.split_id: s for s in rolling_splits(close.index, WindowSpec(train="1y", valid="3m", test="1m", purge="5d", embargo="2d"))},
+        "splits": {s.split_id: s for s in protocol_splits},
         "seed": args.seed,
     })
     # 词表缓存预热（fold 无关）：worker fork 后命中

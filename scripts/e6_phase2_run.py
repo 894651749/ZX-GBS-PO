@@ -32,6 +32,7 @@ import pandas as pd
 
 from qgbs.backtest.metrics import rank_ic
 from qgbs.backtest.rolling import WindowSpec, rolling_splits
+from qgbs.backtest.rolling import protocol_splits as protocol_splits_
 from qgbs.data.adapters.csv_adapter import CsvAdapter
 from qgbs.experiments.runner import load_config
 from qgbs.factors.finance import build_finance_features
@@ -116,6 +117,18 @@ def greedy_select(
             continue
         selected.append(c)
     return selected
+
+
+def _safe_ic_mean(pred: pd.Series, y: pd.Series) -> float:
+    """逐日 rank IC 均值；空/退化输入返回 nan（不崩）。"""
+    if len(pred) == 0:
+        print("警告：IC 输入为空，记 nan", flush=True)
+        return float("nan")
+    if isinstance(pred, pd.DataFrame):
+        pred = pred.squeeze(axis=1)
+    ics = _per_date_rank_ic(pred, y.reindex(pred.index))
+    arr = np.asarray(ics, dtype=float).ravel()
+    return float(np.nanmean(arr)) if arr.size else float("nan")
 
 
 def _fit_ridge_ic(X_tr, y_tr, X_va, y_va) -> float:
@@ -209,8 +222,10 @@ def main(argv=None) -> None:
     import multiprocessing as mp
     ctx = mp.get_context("fork" if "fork" in mp.get_all_start_methods() else "spawn")
 
+    # 协议折过滤（剔除 test 窗无再平衡日的尾折）
+    protocol_splits = protocol_splits_(close.index, spec)
     rng = np.random.default_rng(args.seed)
-    for split in rolling_splits(close.index, spec):
+    for split in protocol_splits:
         if folds_wanted is not None and split.split_id not in folds_wanted:
             continue
         if split.split_id in done:
@@ -297,9 +312,9 @@ def main(argv=None) -> None:
             res = search_hyperparams("ridge", X_tr_full, y_tr, X_va_full, y_va, {"alpha": ALPHA_GRID})
             best_alpha = float(res.best_params.get("alpha", 1.0))
             m = RidgeReadout(alpha=best_alpha).fit(X_tr_full, y_tr)
-            ic_va = float(_per_date_rank_ic(m.predict(X_va_full), y_va).mean())
+            ic_va = _safe_ic_mean(m.predict(X_va_full), y_va)
             pred_te = m.predict(X_te_full)
-            ic_te = float(_per_date_rank_ic(pred_te, y_te).mean())
+            ic_te = _safe_ic_mean(pred_te, y_te)
             return {"alpha": best_alpha, "valid_ic": ic_va, "test_ic": ic_te}
 
         # 臂 A：26 经典 + 4024 全量拼接

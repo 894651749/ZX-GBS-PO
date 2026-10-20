@@ -55,3 +55,31 @@ def test_write_summary(tmp_path) -> None:
     assert s["configs"]["R1_gbs"]["sharpe"] > s["configs"]["R0_lw"]["sharpe"]
     assert "R1−R0_lw" in s["paired"]
     assert s["paired"]["R1−R0_lw"]["sharpe"]["delta"] > 0
+
+
+def test_protocol_splits_excludes_tail_fold() -> None:
+    """回归：fold 20（半月残段、无再平衡日）不进入协议折列表。"""
+    from qgbs.backtest.rolling import WindowSpec, protocol_splits, rolling_splits
+
+    dates = pd.bdate_range("2023-01-03", "2025-12-31")
+    spec = WindowSpec(train="1y", valid="3m", test="1m", purge="5d", embargo="2d")
+    all_s = list(rolling_splits(dates, spec))
+    proto = protocol_splits(dates, spec)
+    assert len(all_s) == len(proto) + 1  # 恰好剔除一个尾折
+    assert all(s.split_id <= 19 for s in proto)  # 协议折 0–19
+    assert proto[-1].test[-1] < all_s[-1].test[-1]  # 尾折 test 更深
+
+
+def test_safe_fold_ic_degenerate_windows() -> None:
+    """退化窗口（空面板/单日/全 NaN 标签）的 IC 计算不抛异常。"""
+    from scripts.e8_phase2_run import _safe_fold_ic
+
+    labels = pd.Series(dtype=float)
+    # 空面板 → nan
+    empty = pd.DataFrame()
+    assert np.isnan(_safe_fold_ic(empty, labels))
+    # 单日期单股票（<3 截面点）→ nan
+    idx = pd.MultiIndex.from_tuples([(pd.Timestamp("2024-01-02"), "s0")], names=["date", "symbol"])
+    panel = pd.DataFrame({"s0": [0.01]}, index=pd.DatetimeIndex(["2024-01-02"]))
+    y = pd.Series([0.01], index=idx)
+    assert np.isnan(_safe_fold_ic(panel, y))

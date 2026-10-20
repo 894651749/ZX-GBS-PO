@@ -7,6 +7,8 @@ from typing import Iterator
 
 import pandas as pd
 
+from qgbs.data.calendar import rebalance_dates
+
 
 @dataclass(frozen=True)
 class WindowSpec:
@@ -77,3 +79,15 @@ def rolling_splits(dates: pd.DatetimeIndex, spec: WindowSpec) -> Iterator[Split]
             break
         yield Split(split_id=split_id, train=train, valid=valid, test=test)
         split_id += 1
+
+
+def protocol_splits(dates: pd.DatetimeIndex, spec: WindowSpec) -> list[Split]:
+    """协议折序列：剔除 test 窗内无月度再平衡日的尾折（半月残段）。
+
+    与 run_experiment 的折过滤同口径（runner.py 的 test_rebal/fold_rebal 逻辑）：
+    正式 P1 协议 20 折（0–19），尾折（如 test 2025-12-10~12-31）不进入。
+    """
+    all_splits = list(rolling_splits(dates, spec))
+    test_set_dates = {d for s in all_splits for d in s.test}
+    test_rebal = [d for d in rebalance_dates(dates, spec.test) if d in test_set_dates]
+    return [s for s in all_splits if any(d in set(s.test) for d in test_rebal)]
