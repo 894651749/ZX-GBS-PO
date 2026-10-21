@@ -1,0 +1,26 @@
+{
+  "batch_id": "sim-copula-32x9-s44-n20000-eta0.7",
+  "device_version": "simulator-gaussian-copula",
+  "n_modes": 288,
+  "n_shots": 20000,
+  "started_at": "2026-09-28T13:04:28.072282+00:00",
+  "finished_at": "2026-09-28T13:04:28.072282+00:00",
+  "source": "simulation",
+  "calibration_session_id": "sim-session-44",
+  "simulation_params": {
+    "method": "gaussian_copula_threshold",
+    "seed": 44,
+    "mean_click_rate": 0.3,
+    "note": "近似仿真，不替代真机 GBS（hafnian/Torontonian 采样）"
+  },
+  "system_efficiency": 0.7,
+  "mode_config": {
+    "n_temporal": 32,
+    "n_spatial": 9,
+    "temporal_peak_mode": 15.0,
+    "temporal_mean_click": 0.5344063609424174,
+    "derived_partition_boundary": 16.0
+  },
+  "detector_config": {},
+  "quality_flags": {}
+}

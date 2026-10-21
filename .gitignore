@@ -79,11 +79,12 @@ secrets/
 *.log
 logs/
 
-# ---- 项目数据与产物（体积大，不上传 GitHub；/ 前缀锚定根目录，避免误伤 src/qgbs/data 等同名源码目录）----
+# ---- 项目数据与产物（体积大，不上传远程仓库；/ 前缀锚定根目录，避免误伤 src/qgbs/data 等同名源码目录）----
 /data/
 /data_store/
 /artifacts/
-/sample_store/
+# 样本库：批次 meta 与小型仿真样本入库（协作复现需要），真机大样本不入库
+/sample_store/hardware/*/packed.npy
 /docs-forme/
 *.csv
 *.xlsx

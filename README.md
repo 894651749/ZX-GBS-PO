@@ -29,7 +29,7 @@ pip install -e ".[gbs-sim]"  # 精确 GBS 仿真（strawberryfields/thewalrus）
 
 ```bash
 pytest -q
-# 预期：249 passed
+# 预期：312 passed
 ```
 
 ### 3. 跑通第一个实验（mock 数据，无需任何外部数据）
@@ -63,6 +63,9 @@ print(run_all(['Q1', 'Q2', 'Q3', 'Q4'])) # GBS 特征族（仿真样本）
 # 2. ETL 生成标准化数据仓
 PYTHONPATH=src python -m qgbs.data.etl_zx --data-dir data --out-dir data_store
 
+# 2b.（可选）构建业务资产池派生仓 pool29 / pool100（供 *_pool29_* / *_pool100_* 配置使用）
+PYTHONPATH=src python scripts/build_business_pools.py
+
 # 3. 运行真实数据实验（*_csv.yaml 后缀的配置）
 PYTHONPATH=src python -c "
 from qgbs.experiments.runner import run_experiment
@@ -87,10 +90,14 @@ src/qgbs/           核心代码
   ├── portfolio/    组合优化（cvxpy）
   ├── backtest/     滚动回测引擎与指标
   └── experiments/  配置驱动的实验执行器（runner.py 为入口）
-scripts/            辅助脚本（P2 诊断等）
+scripts/            辅助脚本（P2 诊断、资产池构建、真机样本入库、E5-E8 实验等）
 tests/              pytest 测试套件
-docs/               方案与阶段报告
+docs/               实验设计与阶段报告
+docs-report/        对内汇报材料
+sample_store/       GBS 样本库（批次 meta 与仿真小样本入库；真机大样本 packed.npy 不入库）
+data/               中信交付原始数据（不入库）
 data_store/         ETL 产物（真实数据，不入库）
+data_store_derived/ 业务资产池派生仓（scripts/build_business_pools.py 生成，不入库）
 artifacts/          实验产物（不入库）
 ```
 
@@ -100,7 +107,8 @@ artifacts/          实验产物（不入库）
 - **Q1-Q4**：GBS 特征族（边际、二阶、高阶、全量增强）
 - 配置同名双版本：无后缀 = mock 数据；`_csv` 后缀 = 中信真实交付数据
 - `_hardware` 后缀 = 真机 GBS 样本（批次入库见 `scripts/ingest_hardware_samples.py`；
-  按路径运行，不注册进 registry，如 `q1_marginal_hardware.yaml`）
+  按路径运行，不注册进 registry，如 `q1_marginal_hardware.yaml`）。真机样本大文件
+  不入库（仓库仅含批次 meta），实际运行需另行获取样本放入 `sample_store/hardware/<batch_id>/`
 
 ## 注意事项
 

@@ -1,0 +1,22 @@
+{
+  "batch_id": "hw-5M-b0",
+  "device_version": "unknown-pending-device-metadata",
+  "n_modes": 8176,
+  "n_shots": 5000000,
+  "started_at": "2026-10-08T09:09:20.896598+00:00",
+  "finished_at": "2026-10-08T09:09:20.896598+00:00",
+  "source": "hardware",
+  "calibration_session_id": "unknown-pending-calibration",
+  "simulation_params": {},
+  "system_efficiency": null,
+  "mode_config": {
+    "n_temporal": 511,
+    "n_spatial": 16
+  },
+  "detector_config": {},
+  "quality_flags": {
+    "timestamps_are_file_receipt": true,
+    "metadata_pending": true,
+    "bit_packing": "np.packbits axis=1 big-endian"
+  }
+}
