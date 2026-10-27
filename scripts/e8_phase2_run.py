@@ -23,6 +23,7 @@ from qgbs.backtest.metrics import annual_volatility, calmar, information_ratio, 
 from qgbs.backtest.rolling import WindowSpec, rolling_splits
 from qgbs.backtest.rolling import protocol_splits as protocol_splits_
 from qgbs.data.adapters.csv_adapter import CsvAdapter
+from qgbs.data.calendar import rebalance_dates
 from qgbs.experiments.runner import _build_gbs_panel, _prepare_gbs_backend, load_config
 from qgbs.factors.finance import build_finance_features
 from qgbs.factors.neutralization import MARKET_COL, JointFactorModel, build_alpha_label
@@ -73,21 +74,31 @@ def _done_units(jsonl: Path) -> set[tuple[int, str]]:
 
 
 def _run_engine(shared: dict, split, dates, delta, provider, alpha_panel, labels) -> dict:
-    """单配置单窗（valid 或 test）评估。"""
+    """单配置单窗（valid 或 test）评估。
+
+    口径与 runner.py 标准路径（L534-536/L795-825）一致：
+    - alpha 只给窗内月度调仓日（rebalance_dates(freq="1m") ∩ 窗口），
+      直接传整窗日频 alpha 会导致引擎在窗内每日调仓；
+    - 收益切片到窗口——引擎在全行情区间记账，最后一个调仓日之后的
+      漂移段不属于本窗，必须切除（否则跨折指标被同一漂移段主导）。
+    """
     eng = BacktestEngine(window_spec=shared["spec"], constraints=shared["constraints"],
                          optimizer_params=shared["opt"], cost_model=shared["cost_model"],
                          risk_prior_delta=delta)
-    panel = alpha_panel.loc[alpha_panel.index.isin(dates)]
+    date_set = set(dates)
+    rebal = [d for d in shared["rebal_all"] if d in date_set]
+    assert rebal, f"窗口无月度调仓日（{dates[0]}~{dates[-1]}）"
+    panel = alpha_panel.loc[alpha_panel.index.isin(rebal)]
     bt = eng.run(shared["market"], shared["status"], risk_free_daily=shared["rf_daily"],
                  alpha_panel=panel, exposure_matrix=shared["exposure"],
                  risk_prior_provider=provider)
-    r = bt.returns
-    pred = alpha_panel.loc[alpha_panel.index.isin(dates)]
+    r = bt.returns[bt.returns.index.isin(date_set)]
+    nav = (1.0 + r).cumprod()
     return {"sharpe": sharpe(r), "ir": information_ratio(r, shared["bench"]),
-            "calmar": calmar(bt.nav), "realized_vol": annual_volatility(r),
+            "calmar": calmar(nav), "realized_vol": annual_volatility(r),
             "turnover": float(bt.turnover.mean()), "n_rebalances": len(bt.weights),
             "returns": {str(d.date()): float(v) for d, v in r.items()},
-            "nav": {str(d.date()): float(v) for d, v in bt.nav.items()}}
+            "nav": {str(d.date()): float(v) for d, v in nav.items()}}
 
 
 def _safe_fold_ic(pred_panel: pd.DataFrame, labels: pd.Series) -> float:
@@ -170,7 +181,8 @@ def _run_fold(split_id: int) -> list[dict]:
         for delta in DELTA_GRID:
             r = _run_engine(shared, split, va_dates, delta, prov, alpha_panel, labels)
             scores[str(delta)] = r["sharpe"]
-        best = max(scores, key=lambda d: scores[d])
+        # 平票时取更大 δ（保守方向：valid 无法区分时偏向退回经典 LW）
+        best = max(scores, key=lambda k: (scores[k], float(k)))
         res = _run_engine(shared, split, te_dates, float(best), prov, alpha_panel, labels)
         recs.append({"split_id": split_id, "config": name, "delta": float(best),
                      "valid_scores": scores, "rank_ic_test": ic_te,
@@ -235,6 +247,7 @@ def main(argv=None) -> None:
         "opt": OptimizerParams(risk_aversion=5.0, turnover_penalty=0.001, l2_regularization=0.0001),
         "rf_daily": 0.02 / 252.0, "bench": msf.index_returns[mkt_code],
         "exposure": pd.get_dummies(industry).astype(float),
+        "rebal_all": rebalance_dates(close.index, spec.test),
         "splits": {s.split_id: s for s in protocol_splits},
         "seed": args.seed,
     })
@@ -250,7 +263,10 @@ def main(argv=None) -> None:
             and (sid, CONFIGS[-1]) not in done]  # 以最后配置为折完成标记
     print(f"待跑折：{todo}", flush=True)
 
+    import gc
     import multiprocessing as mp
+    gc.collect()
+    gc.freeze()  # 预建对象移入永久代：fork 后保持写时复制共享，抑制 worker 内存膨胀
     ctx = mp.get_context("fork" if "fork" in mp.get_all_start_methods() else "spawn")
     if args.processes > 1 and len(todo) > 1:
         with ctx.Pool(args.processes) as pool_:
@@ -264,6 +280,13 @@ def main(argv=None) -> None:
                 with jsonl.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(r, ensure_ascii=False) + "\n")
     _write_summary(out, jsonl)
+
+
+def _rec_returns(rec: dict) -> pd.Series:
+    """jsonl 记录的 returns 字段还原为 DatetimeIndex Series（折间 test 窗互斥，拼接无重复）。"""
+    s = pd.Series(rec["returns"], dtype=float)
+    s.index = pd.to_datetime(s.index)
+    return s
 
 
 def _write_summary(out: Path, jsonl: Path) -> None:
@@ -293,8 +316,8 @@ def _write_summary(out: Path, jsonl: Path) -> None:
             common = sorted(set(ra) & set(rb))
             if len(common) < 8:
                 continue
-            rets_a = pd.concat([pd.Series(ra[k]["returns"]) for k in common]).sort_index()
-            rets_b = pd.concat([pd.Series(rb[k]["returns"]) for k in common]).sort_index()
+            rets_a = pd.concat([_rec_returns(ra[k]) for k in common]).sort_index()
+            rets_b = pd.concat([_rec_returns(rb[k]) for k in common]).sort_index()
             # IR 基准位置化（重采样 Series 为位置索引；基准按交集日期对齐后取 values）
             common_dates = rets_a.index.intersection(rets_b.index)
             if bench is not None:
